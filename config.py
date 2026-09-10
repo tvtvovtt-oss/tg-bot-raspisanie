@@ -21,6 +21,7 @@ def parse_admin_ids(raw_str: str) -> list[int]:
 
 
 ADMIN_IDS = parse_admin_ids(os.getenv("ADMIN_IDS", "5966353805,7218741941"))
+ENABLE_NOTIFICATIONS = os.getenv("ENABLE_NOTIFICATIONS", "false").strip().lower() in ("true", "1", "yes")
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан в .env файле!")

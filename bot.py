@@ -8,7 +8,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
-from config import BOT_TOKEN, PROXY_URL
+from config import BOT_TOKEN, PROXY_URL, ENABLE_NOTIFICATIONS
 from database import init_db
 from handlers import router
 from parser import get_groups, get_available_dates
@@ -74,14 +74,20 @@ async def main():
     # Delete webhook to prevent conflicts and drop pending updates
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # Start background notifier worker
-    notifier_task = asyncio.create_task(schedule_notification_worker(bot))
+    # Start background notifier worker (if enabled in config)
+    notifier_task = None
+    if ENABLE_NOTIFICATIONS:
+        notifier_task = asyncio.create_task(schedule_notification_worker(bot))
+        logger.info("Фоновый сервис уведомлений о расписании запущен.")
+    else:
+        logger.info("Фоновые уведомления о новом расписании отключены (ENABLE_NOTIFICATIONS=false).")
 
     logger.info("Бот успешно запущен и готов к работе!")
     try:
         await dp.start_polling(bot)
     finally:
-        notifier_task.cancel()
+        if notifier_task:
+            notifier_task.cancel()
         await bot.session.close()
         logger.info("Бот остановлен.")
 

@@ -45,6 +45,10 @@ async def check_and_notify_users(bot: Bot):
     global _IS_FIRST_RUN
 
     try:
+        from config import ENABLE_NOTIFICATIONS
+        if not ENABLE_NOTIFICATIONS:
+            return
+
         if await is_maintenance_mode():
             logger.info("Технический перерыв включен: отправка плановых уведомлений приостановлена.")
             return
@@ -212,6 +216,11 @@ async def schedule_notification_worker(bot: Bot):
     """
     Background worker loop checking for schedule updates every 3 minutes.
     """
+    from config import ENABLE_NOTIFICATIONS
+    if not ENABLE_NOTIFICATIONS:
+        logger.info("Фоновый сервис уведомлений о расписании отключен (ENABLE_NOTIFICATIONS=false).")
+        return
+
     logger.info("Запущен фоновый сервис уведомлений о расписании.")
     while True:
         try:
