@@ -56,6 +56,28 @@ def normalize_string(s: str) -> str:
     return re.sub(r"[\s\-_.\(\)]+", "", s.lower())
 
 
+def decode_response_text(resp: httpx.Response) -> str:
+    """Корректно декодирует тело ответа с автоопределением utf-8 / windows-1251."""
+    content = resp.content
+    try:
+        text = content.decode("utf-8")
+        if "\ufffd" not in text:
+            return text
+    except Exception:
+        pass
+    try:
+        return content.decode("windows-1251")
+    except Exception:
+        return content.decode("utf-8", errors="replace")
+
+
+def decode_response_json(resp: httpx.Response) -> Any:
+    """Парсит JSON с автоопределением кодировки (utf-8 / windows-1251)."""
+    import json
+    text = decode_response_text(resp)
+    return json.loads(text)
+
+
 async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
     """Fetches available schedule dates from /2020/schedule/dates"""
     global _DATES_CACHE, _DATES_CACHE_TIME
@@ -68,7 +90,7 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
         async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=12.0, follow_redirects=True) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
-                data = resp.json()
+                data = decode_response_json(resp)
                 today = data.get("now", "")
                 selected = data.get("selected_date", today)
                 raw_dates = data.get("dates", [])
@@ -148,7 +170,7 @@ async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
         async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=15.0, follow_redirects=True) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
-                data = resp.json()
+                data = decode_response_json(resp)
                 groups_dict = {}
                 raw_groups = data.get("groups", {})
                 
@@ -280,7 +302,7 @@ async def get_staffs(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
         async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=15.0, follow_redirects=True) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
-                data = resp.json()
+                data = decode_response_json(resp)
                 staffs_dict = {}
                 raw_staffs = data.get("staffs", {})
                 
@@ -362,7 +384,7 @@ async def get_teachers_by_letter(letter: str, limit: int = 30) -> List[Dict[str,
     return results[:limit]
 
 
-async def get_group_schedule(group_id: str, date_str: str) -> Dict[str, Any]:
+async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool = False) -> Dict[str, Any]:
     """
     Parses schedule for a specific group and date.
     URL: /2020/site/schedule/group/{group_id}/{date_str}
@@ -377,8 +399,8 @@ async def get_group_schedule(group_id: str, date_str: str) -> Dict[str, Any]:
                     "error": f"Сайт техникума вернул код ответа {resp.status_code}.",
                     "lessons": []
                 }
-            resp.encoding = "utf-8"
-            soup = BeautifulSoup(resp.text, "html.parser")
+            html_text = decode_response_text(resp)
+            soup = BeautifulSoup(html_text, "html.parser")
     except Exception as e:
         return {
             "success": False,
@@ -489,7 +511,7 @@ async def get_group_schedule(group_id: str, date_str: str) -> Dict[str, Any]:
     }
 
 
-async def get_teacher_schedule(staff_id: str, date_str: str) -> Dict[str, Any]:
+async def get_teacher_schedule(staff_id: str, date_str: str, force_refresh: bool = False) -> Dict[str, Any]:
     """
     Parses schedule for a teacher on date_str.
     URL: /2020/site/schedule/staff/{staff_id}/{date_str}
@@ -504,8 +526,8 @@ async def get_teacher_schedule(staff_id: str, date_str: str) -> Dict[str, Any]:
                     "error": f"Сайт вернул код ответа {resp.status_code}.",
                     "lessons": []
                 }
-            resp.encoding = "utf-8"
-            soup = BeautifulSoup(resp.text, "html.parser")
+            html_text = decode_response_text(resp)
+            soup = BeautifulSoup(html_text, "html.parser")
     except Exception as e:
         return {
             "success": False,

@@ -23,7 +23,7 @@ from keyboards import (
     get_schedule_nav_inline_keyboard,
     get_teacher_schedule_nav_inline_keyboard
 )
-from premium_emoji import te, PE_BELL
+from premium_emoji import te, PE_BELL, strip_tg_emoji
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +122,20 @@ async def check_and_notify_users(bot: Bot):
                             disable_web_page_preview=True
                         )
                         logger.info(f"Уведомление о расписании отправлено пользователю {u_id} (группа {g_name}, дата {date_str})")
-                    except (TelegramForbiddenError, TelegramBadRequest) as e:
-                        logger.warning(f"Не удалось отправить уведомление {u_id}: {e}")
+                    except TelegramBadRequest as e:
+                        try:
+                            clean_text = strip_tg_emoji(full_text)
+                            await bot.send_message(
+                                chat_id=u_id,
+                                text=clean_text,
+                                reply_markup=kb,
+                                disable_web_page_preview=True
+                            )
+                            logger.info(f"Уведомление о расписании отправлено пользователю {u_id} (без тегов эмодзи)")
+                        except Exception as e2:
+                            logger.warning(f"Не удалось отправить уведомление {u_id}: {e2}")
+                    except TelegramForbiddenError as e:
+                        logger.warning(f"Пользователь {u_id} заблокировал бота: {e}")
                     except Exception as e:
                         logger.error(f"Неожиданная ошибка при отправке пользователю {u_id}: {e}")
                     finally:
@@ -167,8 +179,20 @@ async def check_and_notify_users(bot: Bot):
                             disable_web_page_preview=True
                         )
                         logger.info(f"Уведомление отправлено пользователю {u_id} (преподаватель {t_name}, дата {date_str})")
-                    except (TelegramForbiddenError, TelegramBadRequest) as e:
-                        logger.warning(f"Не удалось отправить уведомление {u_id}: {e}")
+                    except TelegramBadRequest as e:
+                        try:
+                            clean_text = strip_tg_emoji(full_text)
+                            await bot.send_message(
+                                chat_id=u_id,
+                                text=clean_text,
+                                reply_markup=kb,
+                                disable_web_page_preview=True
+                            )
+                            logger.info(f"Уведомление отправлено пользователю {u_id} (без тегов эмодзи)")
+                        except Exception as e2:
+                            logger.warning(f"Не удалось отправить уведомление {u_id}: {e2}")
+                    except TelegramForbiddenError as e:
+                        logger.warning(f"Пользователь {u_id} заблокировал бота: {e}")
                     except Exception as e:
                         logger.error(f"Неожиданная ошибка при отправке {u_id}: {e}")
                     finally:

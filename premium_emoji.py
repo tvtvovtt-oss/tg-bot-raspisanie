@@ -142,20 +142,29 @@ EMOJI_FALLBACKS = {
 }
 
 
-def te(emoji_id: str, fallback: str = "🔹") -> str:
+from typing import Optional
+import re
+
+def te(emoji_id: str, fallback: Optional[str] = None) -> str:
     """Собирает HTML-тег премиум-эмодзи.
     
     Внутри <tg-emoji> всегда подставляется валидный Unicode-эмодзи,
-    чтобы избежать ошибки Telegram 'Bad Request: ENTITY_TEXT_INVALID'.
+    соответствующий смыслу иконки, чтобы избежать ошибки Telegram 'Bad Request: ENTITY_TEXT_INVALID'.
     """
-    fb = fallback
-    if not fb or fb in ("•", "-", "*", "."):
+    if fallback is None or fallback in ("•", "-", "*", "."):
         fb = EMOJI_FALLBACKS.get(emoji_id, "🔹")
-    elif fb == "!":
+    elif fallback == "!":
         fb = "❗"
-    elif fb == "?":
+    elif fallback == "?":
         fb = "❓"
+    else:
+        fb = fallback
     return f'<tg-emoji emoji-id="{emoji_id}">{fb}</tg-emoji>'
+
+
+def strip_tg_emoji(text: str) -> str:
+    """Удаляет теги <tg-emoji>, оставляя внутри валидные Unicode-эмодзи."""
+    return re.sub(r'<tg-emoji[^>]*>(.*?)</tg-emoji>', r'\1', text)
 
 
 # ---- Цветные кнопки -------------------------------------------------------
