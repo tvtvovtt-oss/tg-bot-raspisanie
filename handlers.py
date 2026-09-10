@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 import html
 from typing import Optional
@@ -9,7 +10,10 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from database import get_user, set_user_group, set_user_teacher, toggle_user_notifications
+from database import (
+    get_user, set_user_group, set_user_teacher, toggle_user_notifications,
+    is_admin, is_maintenance_mode, set_maintenance_mode, get_bot_stats, get_all_user_ids
+)
 from parser import (
     get_available_dates,
     get_groups,
@@ -40,10 +44,14 @@ from keyboards import (
     get_teacher_schedule_nav_inline_keyboard,
     get_calls_keyboard,
     get_my_group_keyboard,
+    get_admin_keyboard,
+    get_admin_back_keyboard,
+    get_broadcast_confirm_keyboard,
     DateCallback,
     GroupCallback,
     TeacherCallback,
-    MenuCallback
+    MenuCallback,
+    AdminCallback
 )
 import logging
 logger = logging.getLogger(__name__)
@@ -60,6 +68,7 @@ router = Router()
 class BotStates(StatesGroup):
     waiting_for_group_search = State()
     waiting_for_teacher_search = State()
+    waiting_for_broadcast = State()
 
 
 async def safe_query_answer(query: CallbackQuery, text: Optional[str] = None, show_alert: bool = False):
@@ -149,13 +158,14 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user = await get_user(message.from_user.id)
     first_name = message.from_user.first_name or "студент"
+    is_adm = await is_admin(message.from_user.id)
     
     await safe_answer(
         message,
         build_welcome_text(user, first_name),
         reply_markup=get_main_keyboard()
     )
-    await safe_answer(message, get_menu_text(user), reply_markup=get_main_menu_inline())
+    await safe_answer(message, get_menu_text(user), reply_markup=get_main_menu_inline(is_admin_user=is_adm))
 
 
 @router.message(Command("help"))
@@ -324,9 +334,19 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
 
     if action == "home":
         # Возврат в главное меню
+        is_adm = await is_admin(query.from_user.id)
         text = get_menu_text(user)
-        kb = get_main_menu_inline()
+        kb = get_main_menu_inline(is_admin_user=is_adm)
         await safe_edit_text(query.message, text, reply_markup=kb)
+
+    elif action == "admin":
+        if not await is_admin(query.from_user.id):
+            await safe_query_answer(query, "⛔️ Доступ запрещен.", show_alert=True)
+            return
+        panel_text = await render_admin_panel_text()
+        is_maint = await is_maintenance_mode()
+        kb = get_admin_keyboard(is_maint)
+        await safe_edit_text(query.message, panel_text, reply_markup=kb)
 
     elif action == "today":
         if not user or not user.get("group_id"):
@@ -743,3 +763,170 @@ async def handle_group_search_query(message: Message, query: str, preloaded_grou
         f"{te(PE_PEOPLE)} <b>Найденные группы ({len(groups)}):</b>\nВыбери свою группу кнопками:",
         reply_markup=kb
     )
+
+
+# ---------- Панель администратора (/admin) ----------
+
+async def render_admin_panel_text() -> str:
+    """Формирует текст главной панели администратора."""
+    is_maint = await is_maintenance_mode()
+    stats = await get_bot_stats()
+    maint_status = "🔴 <b>ВКЛЮЧЕН</b> (доступ только админам)" if is_maint else "🟢 <b>ВЫКЛЮЧЕН</b> (бот открыт для всех)"
+    return (
+        f"👑 <b>Панель администратора</b>\n\n"
+        f"🛠 <b>Технический перерыв:</b> {maint_status}\n\n"
+        f"👥 <b>Пользователей в базе:</b> <code>{stats['total']}</code>\n"
+        f"🔔 <b>С уведомлениями:</b> <code>{stats['with_notif']}</code>\n"
+        f"🎓 <b>Выбрали группу:</b> <code>{stats['with_group']}</code>\n"
+        f"👨‍🏫 <b>Выбрали преподавателя:</b> <code>{stats['with_teacher']}</code>"
+    )
+
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext):
+    """Команда открытия панели администратора."""
+    await state.clear()
+    if not await is_admin(message.from_user.id):
+        await safe_answer(message, f"{te(PE_WARNING, '!')} <b>Доступ запрещен.</b> У вас нет прав администратора.")
+        return
+    panel_text = await render_admin_panel_text()
+    is_maint = await is_maintenance_mode()
+    await safe_answer(message, panel_text, reply_markup=get_admin_keyboard(is_maint))
+
+
+@router.callback_query(AdminCallback.filter())
+async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, state: FSMContext):
+    """Обработчик действий внутри панели администратора."""
+    if not await is_admin(query.from_user.id):
+        await safe_query_answer(query, "⛔️ Доступ запрещен.", show_alert=True)
+        return
+
+    action = callback_data.action
+
+    if action == "panel":
+        await state.clear()
+        panel_text = await render_admin_panel_text()
+        is_maint = await is_maintenance_mode()
+        await safe_edit_text(query.message, panel_text, reply_markup=get_admin_keyboard(is_maint))
+        await safe_query_answer(query)
+
+    elif action == "toggle_maint":
+        curr = await is_maintenance_mode()
+        new_maint = not curr
+        await set_maintenance_mode(new_maint)
+        alert_text = (
+            "⚠️ Технический перерыв ВКЛЮЧЕН!\nБот закрыт для всех обычных пользователей."
+            if new_maint else
+            "✅ Технический перерыв ВЫКЛЮЧЕН!\nБот снова открыт для всех пользователей."
+        )
+        await safe_query_answer(query, alert_text, show_alert=True)
+        panel_text = await render_admin_panel_text()
+        await safe_edit_text(query.message, panel_text, reply_markup=get_admin_keyboard(new_maint))
+
+    elif action == "stats":
+        stats = await get_bot_stats()
+        top_groups_str = "\n".join([f"  • <b>{html.escape(g)}</b>: {cnt} чел." for g, cnt in stats["top_groups"]]) or "  <i>Нет данных</i>"
+        text = (
+            f"📊 <b>Детальная статистика бота:</b>\n\n"
+            f"👥 Всего пользователей: <b>{stats['total']}</b>\n"
+            f"🔔 С включенными уведомлениями: <b>{stats['with_notif']}</b>\n"
+            f"🎓 С выбранной группой: <b>{stats['with_group']}</b>\n"
+            f"👨‍🏫 С выбранным преподавателем: <b>{stats['with_teacher']}</b>\n\n"
+            f"🏆 <b>Топ-5 групп:</b>\n{top_groups_str}"
+        )
+        await safe_edit_text(query.message, text, reply_markup=get_admin_back_keyboard())
+        await safe_query_answer(query)
+
+    elif action == "refresh_cache":
+        try:
+            await get_groups(force_refresh=True)
+            await get_available_dates(force_refresh=True)
+            await safe_query_answer(query, "✅ Кэш групп и дат успешно сброшен!", show_alert=True)
+        except Exception as e:
+            await safe_query_answer(query, f"Ошибка обновления кэша: {e}", show_alert=True)
+
+    elif action == "close":
+        await state.clear()
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    elif action == "broadcast":
+        await state.set_state(BotStates.waiting_for_broadcast)
+        text = (
+            "📢 <b>Рассылка сообщений пользователям</b>\n\n"
+            "Отправьте текст сообщения для рассылки всем пользователям бота.\n\n"
+            "<i>Для отмены напишите <code>отмена</code> или нажмите кнопку ниже:</i>"
+        )
+        await safe_edit_text(query.message, text, reply_markup=get_admin_back_keyboard())
+        await safe_query_answer(query)
+
+    elif action == "confirm_bc":
+        data = await state.get_data()
+        bc_text = data.get("broadcast_text")
+        await state.clear()
+        if not bc_text:
+            await safe_query_answer(query, "Текст рассылки не найден.", show_alert=True)
+            return
+
+        user_ids = await get_all_user_ids()
+        await safe_edit_text(query.message, f"⏳ Начинаю рассылку для {len(user_ids)} пользователей...")
+        sent, blocked, failed = 0, 0, 0
+        for uid in user_ids:
+            try:
+                await query.bot.send_message(uid, bc_text, parse_mode="HTML")
+                sent += 1
+            except Exception as e:
+                err = str(e).lower()
+                if "forbidden" in err or "blocked" in err:
+                    blocked += 1
+                else:
+                    failed += 1
+            await asyncio.sleep(0.05)  # Telegram API rate-limit protection
+
+        res_text = (
+            f"📢 <b>Рассылка успешно завершена!</b>\n\n"
+            f"✅ Доставлено: <b>{sent}</b>\n"
+            f"🚫 Заблокировали бота: <b>{blocked}</b>\n"
+            f"⚠️ Ошибок отправки: <b>{failed}</b>\n"
+            f"👥 Всего пользователей: <b>{len(user_ids)}</b>"
+        )
+        await safe_edit_text(query.message, res_text, reply_markup=get_admin_back_keyboard())
+
+    elif action == "cancel_bc":
+        await state.clear()
+        panel_text = await render_admin_panel_text()
+        is_maint = await is_maintenance_mode()
+        await safe_edit_text(query.message, panel_text, reply_markup=get_admin_keyboard(is_maint))
+        await safe_query_answer(query, "Рассылка отменена.")
+
+
+@router.message(BotStates.waiting_for_broadcast)
+async def handle_broadcast_input(message: Message, state: FSMContext):
+    """Прием текста сообщения для массовой рассылки администратором."""
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    text = message.text or message.caption or ""
+    if text.strip().lower() in ("отмена", "/cancel", "отменить"):
+        await state.clear()
+        panel_text = await render_admin_panel_text()
+        is_maint = await is_maintenance_mode()
+        await safe_answer(message, "❌ Рассылка отменена.")
+        await safe_answer(message, panel_text, reply_markup=get_admin_keyboard(is_maint))
+        return
+
+    # Сохраняем HTML-разметку сообщения для рассылки
+    formatted_text = message.html_text if hasattr(message, "html_text") else html.escape(text)
+    await state.update_data(broadcast_text=formatted_text)
+
+    preview_text = (
+        f"📢 <b>Предпросмотр сообщения для рассылки:</b>\n"
+        f"────────────────────\n"
+        f"{formatted_text}\n"
+        f"────────────────────\n\n"
+        f"Подтверждаешь отправку всем пользователям бота?"
+    )
+    await safe_answer(message, preview_text, reply_markup=get_broadcast_confirm_keyboard())

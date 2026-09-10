@@ -9,7 +9,8 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from database import (
     get_users_for_notifications,
     is_user_notified,
-    mark_user_notified
+    mark_user_notified,
+    is_maintenance_mode
 )
 from parser import (
     get_available_dates,
@@ -44,6 +45,10 @@ async def check_and_notify_users(bot: Bot):
     global _IS_FIRST_RUN
 
     try:
+        if await is_maintenance_mode():
+            logger.info("Технический перерыв включен: отправка плановых уведомлений приостановлена.")
+            return
+
         dates_info = await get_available_dates(force_refresh=True)
         today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
         # Only check dates that are officially published on the college site (not synthetic UI placeholders)

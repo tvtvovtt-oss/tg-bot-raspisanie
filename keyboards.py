@@ -35,7 +35,11 @@ class TeacherCallback(CallbackData, prefix="tch"):
 
 
 class MenuCallback(CallbackData, prefix="menu"):
-    action: str  # "home", "today", "tomorrow", "dates", "calls", "mygroup", "teachers", "groups"
+    action: str  # "home", "today", "tomorrow", "dates", "calls", "mygroup", "teachers", "groups", "admin"
+
+
+class AdminCallback(CallbackData, prefix="adm"):
+    action: str  # "toggle_maint", "stats", "refresh_cache", "broadcast", "confirm_bc", "cancel_bc", "close", "panel"
 
 
 # ---------- Reply-клавиатура (только премиум-иконки, чистый текст без дефолт-эмодзи) ----------
@@ -74,7 +78,7 @@ def get_home_button_row() -> List[InlineKeyboardButton]:
 
 # ---------- Inline: главное интерактивное меню ----------
 
-def get_main_menu_inline() -> InlineKeyboardMarkup:
+def get_main_menu_inline(is_admin_user: bool = False) -> InlineKeyboardMarkup:
     """Инлайн-меню: чистый текст с премиум-иконками без дефолтных эмодзи."""
     rows = [
         [
@@ -104,6 +108,13 @@ def get_main_menu_inline() -> InlineKeyboardMarkup:
             )
         ]
     ]
+    if is_admin_user:
+        rows.append([
+            InlineKeyboardButton(
+                text="👑 Панель администратора",
+                callback_data=MenuCallback(action="admin").pack()
+            )
+        ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -426,4 +437,70 @@ def get_my_group_keyboard(notifications_enabled: bool = True) -> InlineKeyboardM
             )
         ],
         get_home_button_row()
+    ])
+
+
+# ---------- Клавиатуры панели администратора ----------
+
+def get_admin_keyboard(is_maintenance: bool) -> InlineKeyboardMarkup:
+    """Клавиатура главной панели администратора."""
+    maint_text = "🟢 Открыть бота (выкл. тех. перерыв)" if is_maintenance else "🔴 Закрыть бота на тех. перерыв"
+    kb = [
+        [
+            InlineKeyboardButton(
+                text=maint_text,
+                callback_data=AdminCallback(action="toggle_maint").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📊 Статистика",
+                callback_data=AdminCallback(action="stats").pack()
+            ),
+            InlineKeyboardButton(
+                text="🔄 Сбросить кэш сайта",
+                callback_data=AdminCallback(action="refresh_cache").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📢 Рассылка пользователям",
+                callback_data=AdminCallback(action="broadcast").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="❌ Закрыть панель",
+                callback_data=AdminCallback(action="close").pack()
+            )
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_admin_back_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура возврата в админ-панель."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="« Назад в админ-панель",
+                callback_data=AdminCallback(action="panel").pack()
+            )
+        ]
+    ])
+
+
+def get_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения рассылки."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Отправить всем",
+                callback_data=AdminCallback(action="confirm_bc").pack()
+            ),
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=AdminCallback(action="cancel_bc").pack()
+            )
+        ]
     ])

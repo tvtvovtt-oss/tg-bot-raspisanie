@@ -13,6 +13,7 @@ from database import init_db
 from handlers import router
 from parser import get_groups, get_available_dates
 from notifier import schedule_notification_worker
+from middlewares import MaintenanceMiddleware
 
 # Configure logging
 logging.basicConfig(
@@ -63,6 +64,8 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     dp = Dispatcher()
+    dp.message.outer_middleware(MaintenanceMiddleware())
+    dp.callback_query.outer_middleware(MaintenanceMiddleware())
     dp.include_router(router)
 
     # Set commands menu in Telegram UI
