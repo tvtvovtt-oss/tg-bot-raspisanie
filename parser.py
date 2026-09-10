@@ -483,74 +483,188 @@ async def get_teacher_schedule(staff_id: str, date_str: str) -> Dict[str, Any]:
     }
 
 
+ROMAN_MAP = {
+    "1": "I", "2": "II", "3": "III", "4": "IV",
+    "5": "V", "6": "VI", "7": "VII", "8": "VIII"
+}
+
+WEEKDAYS_RU = [
+    "понедельник", "вторник", "среда", "четверг",
+    "пятница", "суббота", "воскресенье"
+]
+
+MONTHS_RU = [
+    "", "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря"
+]
+
+
+def format_russian_date(date_str: str) -> str:
+    """Formats 'YYYY-MM-DD' to Russian: e.g. 'пятница, 23 января 2026'."""
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return f"{WEEKDAYS_RU[dt.weekday()]}, {dt.day} {MONTHS_RU[dt.month]} {dt.year}"
+    except Exception:
+        return date_str
+
+
+def to_roman_pair(pair_str: str) -> str:
+    """Normalizes pair string to Roman numeral: 'I', 'II', 'III', etc."""
+    p = pair_str.strip()
+    clean = re.sub(r"[^\w\d]", "", p).upper()
+    if clean in ["I", "II", "III", "IV", "V", "VI", "VII", "VIII"]:
+        return clean
+    if clean in ROMAN_MAP:
+        return ROMAN_MAP[clean]
+    m = re.search(r"\d+", p)
+    if m and m.group(0) in ROMAN_MAP:
+        return ROMAN_MAP[m.group(0)]
+    return p or "I"
+
+
+def parse_pair_times(time_str: str) -> Tuple[Optional[str], Optional[str], Optional[datetime], Optional[datetime]]:
+    """Extracts start and end times, e.g. '08:00', '09:30' and dummy datetimes."""
+    m = re.search(r"(\d{1,2})[\s:]*(\d{2})\s*[-–—]\s*(\d{1,2})[\s:]*(\d{2})", time_str)
+    if m:
+        h1, m1, h2, m2 = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        t1_str = f"{h1:02d}:{m1:02d}"
+        t2_str = f"{h2:02d}:{m2:02d}"
+        dt1 = datetime(2000, 1, 1, h1, m1)
+        dt2 = datetime(2000, 1, 1, h2, m2)
+        return t1_str, t2_str, dt1, dt2
+    return None, None, None, None
+
+
+def format_minutes_ru(m: int) -> str:
+    """Returns correct Russian plural for minutes: 20 минут, 21 минута, 22 минуты."""
+    if 11 <= (m % 100) <= 14:
+        return f"{m} минут"
+    last = m % 10
+    if last == 1:
+        return f"{m} минута"
+    if 2 <= last <= 4:
+        return f"{m} минуты"
+    return f"{m} минут"
+
+
 def format_schedule_message(
     data: Dict[str, Any],
     group_name: str,
     date_str: str,
     day_label: Optional[str] = None
 ) -> str:
-    """Formats group schedule into a Telegram HTML message styled exclusively with premium emojis."""
+    """Formats group schedule into the simplified clean layout with premium emojis."""
     if not data.get("success", True):
         return f"{te(PE_WARNING, '!')} <b>Ошибка получения расписания:</b>\n{html.escape(data.get('error', 'Неизвестная ошибка'))}"
 
-    lines = []
-    header_title = data.get("header") or f"Расписание группы {group_name}"
-    lines.append(f"{te(PE_CLOCK, '•')} <b>{html.escape(header_title)}</b>")
-    
-    if day_label:
-        lines.append(f"{te(PE_CALENDAR, '•')} <b>Дата:</b> <code>{html.escape(date_str)}</code> ({html.escape(day_label)})")
+    human_date = format_russian_date(date_str)
+    if day_label and day_label.lower() not in human_date.lower():
+        date_line = f"{te(PE_CALENDAR)} {human_date} ({html.escape(day_label)})"
     else:
-        lines.append(f"{te(PE_CALENDAR, '•')} <b>Дата:</b> <code>{html.escape(date_str)}</code>")
+        date_line = f"{te(PE_CALENDAR)} {human_date}"
 
-    lines.append("────────────────────")
+    lines = [
+        f"{te(PE_PEOPLE)} <b>Расписание группы {html.escape(group_name)}</b>",
+        date_line,
+        ""
+    ]
 
     lessons = data.get("lessons", [])
     if not lessons:
         alerts = data.get("alerts", [])
         if alerts:
-            lines.append(f"\n{te(PE_INFO, '•')} <i>{html.escape(alerts[0])}</i>")
+            lines.append(f"{te(PE_INFO)} <i>{html.escape(alerts[0])}</i>")
         else:
-            lines.append(f"\n{te(PE_PARTY, '•')} <b>Пар нет!</b> В этот день занятия отсутствуют или расписание ещё не опубликовано.")
+            lines.append(f"{te(PE_PARTY)} <b>Пар нет!</b> В этот день занятия отсутствуют.")
         return "\n".join(lines)
 
+    # Pre-parse pair times to calculate breaks between pairs
+    parsed_lessons = []
     for l in lessons:
-        p_num = l.get("pair", "")
-        p_time = l.get("time", "")
-        p_time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", p_time)
-        
-        lines.append(f"\n{te(PE_CLOCK, '•')} <b>{html.escape(p_num)} пара</b> <code>[{html.escape(p_time_clean)}]</code>")
+        t1, t2, dt1, dt2 = parse_pair_times(l.get("time", ""))
+        parsed_lessons.append({
+            "lesson": l,
+            "t1": t1,
+            "t2": t2,
+            "dt1": dt1,
+            "dt2": dt2
+        })
 
-        items = l.get("items", [])
-        if not items:
-            lines.append("   <i>Занятие не указано</i>")
+    for i, item in enumerate(parsed_lessons):
+        l = item["lesson"]
+        p_num = to_roman_pair(l.get("pair", ""))
+
+        # Format time part: "с 08:00 по 09:30"
+        if item["t1"] and item["t2"]:
+            time_part = f" с {item['t1']} по {item['t2']}"
+        elif l.get("time"):
+            time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", l.get("time", "").strip())
+            time_part = f" [{html.escape(time_clean)}]"
         else:
-            for item in items:
-                sub = f"<b>[{html.escape(item['subgroup'])}]</b> " if item.get("subgroup") else ""
-                subj = f"<b>{html.escape(item['subject'])}</b>" if item.get("subject") else "<i>Предмет не указан</i>"
-                
-                aud = ""
-                if item.get("audience"):
-                    aud_text = item["audience"]
-                    if "on-line" in aud_text.lower():
-                        aud = f" {te(PE_LINK, '•')} <i>(дистант)</i>"
+            time_part = ""
+
+        # Calculate break after this pair if next pair exists and break >= 15 min
+        break_str = ""
+        if i + 1 < len(parsed_lessons):
+            next_dt1 = parsed_lessons[i + 1]["dt1"]
+            curr_dt2 = item["dt2"]
+            if next_dt1 and curr_dt2:
+                diff_min = int((next_dt1 - curr_dt2).total_seconds() / 60)
+                if diff_min >= 15:
+                    break_str = f" <i>(Перемена {format_minutes_ru(diff_min)})</i>"
+
+        # Pair header line
+        lines.append(f"{te(PE_CLOCK)} <b>{p_num} пара{time_part}</b>{break_str}")
+
+        subgroup_items = l.get("items", [])
+        if not subgroup_items:
+            lines.append("  <i>Занятие не указано</i>")
+        else:
+            for sub in subgroup_items:
+                # Subgroup text: "1 п/гр. "
+                sg = sub.get("subgroup", "").strip()
+                if sg:
+                    if not sg.endswith("."):
+                        sg += "."
+                    sg_part = f"{html.escape(sg)} "
+                else:
+                    sg_part = ""
+
+                # Subject: "#Будущего"
+                subj = sub.get("subject", "").strip() or "Предмет не указан"
+                subj_escaped = html.escape(subj)
+
+                # Audience: "(233)" or "(дистант)"
+                aud = sub.get("audience", "").strip()
+                if aud:
+                    if "on-line" in aud.lower():
+                        aud_part = " <i>(дистант)</i>"
                     else:
-                        aud = f" {te(PE_HOUSE, '•')} <i>(каб. {html.escape(aud_text)})</i>"
+                        aud_part = f" ({html.escape(aud)})"
+                else:
+                    aud_part = ""
 
-                teach = f"\n   {te(PE_PERSON_CHECK, '•')} {html.escape(item['teacher'])}" if item.get("teacher") else ""
-                lines.append(f"  • {sub}{subj}{aud}{teach}")
+                # Teacher: "Тухбатуллина Р.А."
+                teacher = sub.get("teacher", "").strip()
+                teacher_part = f" {html.escape(teacher)}" if teacher else ""
 
-                if item.get("homework"):
-                    hw_text = item['homework']
-                    if len(hw_text) > 300:
-                        hw_text = hw_text[:297] + "..."
-                    lines.append(f"   {te(PE_PENCIL, '•')} <b>Д/З:</b> <i>{html.escape(hw_text)}</i>")
-                elif item.get("topic"):
-                    top_text = item['topic']
-                    if len(top_text) > 200:
-                        top_text = top_text[:197] + "..."
-                    lines.append(f"   {te(PE_FILE, '•')} <b>Тема:</b> <i>{html.escape(top_text)}</i>")
+                lines.append(f" {sg_part}{subj_escaped}{aud_part}{teacher_part}")
 
-    msg_text = "\n".join(lines)
+                # Homework & Topic if present
+                if sub.get("homework"):
+                    hw = sub["homework"].strip()
+                    if len(hw) > 200:
+                        hw = hw[:197] + "..."
+                    lines.append(f"   {te(PE_PENCIL)} <i>Д/з: {html.escape(hw)}</i>")
+                elif sub.get("topic"):
+                    top = sub["topic"].strip()
+                    if len(top) > 150:
+                        top = top[:147] + "..."
+                    lines.append(f"   {te(PE_FILE)} <i>Тема: {html.escape(top)}</i>")
+
+        lines.append("")  # Empty line between pairs
+
+    msg_text = "\n".join(lines).strip()
     if len(msg_text) > 4000:
         msg_text = msg_text[:3990] + "\n\n<i>...(расписание сокращено из-за лимита)</i>"
     return msg_text
@@ -561,38 +675,76 @@ def format_teacher_schedule_message(
     teacher_name: str,
     date_str: str
 ) -> str:
-    """Formats teacher schedule into Telegram HTML styled exclusively with premium emojis."""
+    """Formats teacher schedule into clean Telegram HTML with premium emojis."""
     if not data.get("success", True):
         return f"{te(PE_WARNING, '!')} <b>Ошибка:</b>\n{html.escape(data.get('error', ''))}"
 
-    lines = []
-    lines.append(f"{te(PE_PERSON_CHECK, '•')} <b>Расписание преподавателя:</b>\n<b>{html.escape(teacher_name)}</b>")
-    lines.append(f"{te(PE_CALENDAR, '•')} <b>Дата:</b> <code>{html.escape(date_str)}</code>")
-    lines.append("────────────────────")
+    human_date = format_russian_date(date_str)
+    lines = [
+        f"{te(PE_PERSON_CHECK)} <b>Расписание преподавателя:</b>",
+        f"<b>{html.escape(teacher_name)}</b>",
+        f"{te(PE_CALENDAR)} {human_date}",
+        ""
+    ]
 
     lessons = data.get("lessons", [])
     if not lessons:
-        lines.append(f"\n{te(PE_PARTY, '•')} <b>Пар нет!</b> В этот день у преподавателя нет занятий.")
+        lines.append(f"{te(PE_PARTY)} <b>Пар нет!</b> В этот день у преподавателя нет занятий.")
         return "\n".join(lines)
 
+    parsed_lessons = []
     for l in lessons:
-        p_num = l.get("pair", "")
-        p_time = l.get("time", "")
-        p_time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", p_time)
-        
-        lines.append(f"\n{te(PE_CLOCK, '•')} <b>{html.escape(p_num)} пара</b> <code>[{html.escape(p_time_clean)}]</code>")
-        if l.get("group"):
-            lines.append(f"   {te(PE_PEOPLE, '•')} Группа: <b>{html.escape(l['group'])}</b>")
-        if l.get("audience"):
-            aud = l['audience']
-            aud_str = f"{te(PE_LINK, '•')} Дистант" if "on-line" in aud.lower() else f"{te(PE_HOUSE, '•')} Каб. {html.escape(aud)}"
-            lines.append(f"   {aud_str}")
-        if l.get("details"):
-            lines.append(f"   {te(PE_INFO, '•')} <i>{html.escape(l['details'])}</i>")
+        t1, t2, dt1, dt2 = parse_pair_times(l.get("time", ""))
+        parsed_lessons.append({
+            "lesson": l,
+            "t1": t1,
+            "t2": t2,
+            "dt1": dt1,
+            "dt2": dt2
+        })
 
-    msg_text = "\n".join(lines)
+    for i, item in enumerate(parsed_lessons):
+        l = item["lesson"]
+        p_num = to_roman_pair(l.get("pair", ""))
+
+        if item["t1"] and item["t2"]:
+            time_part = f" с {item['t1']} по {item['t2']}"
+        elif l.get("time"):
+            time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", l.get("time", "").strip())
+            time_part = f" [{html.escape(time_clean)}]"
+        else:
+            time_part = ""
+
+        break_str = ""
+        if i + 1 < len(parsed_lessons):
+            next_dt1 = parsed_lessons[i + 1]["dt1"]
+            curr_dt2 = item["dt2"]
+            if next_dt1 and curr_dt2:
+                diff_min = int((next_dt1 - curr_dt2).total_seconds() / 60)
+                if diff_min >= 15:
+                    break_str = f" <i>(Перемена {format_minutes_ru(diff_min)})</i>"
+
+        lines.append(f"{te(PE_CLOCK)} <b>{p_num} пара{time_part}</b>{break_str}")
+
+        grp_part = f"<b>{html.escape(l['group'])}</b>" if l.get("group") else ""
+        aud = l.get("audience", "").strip()
+        if aud:
+            aud_part = " <i>(дистант)</i>" if "on-line" in aud.lower() else f" ({html.escape(aud)})"
+        else:
+            aud_part = ""
+
+        details = l.get("details", "").strip()
+        details_part = f" {html.escape(details)}" if details else ""
+
+        line_body = f"{grp_part}{aud_part}{details_part}".strip()
+        if line_body:
+            lines.append(f" {line_body}")
+
+        lines.append("")
+
+    msg_text = "\n".join(lines).strip()
     if len(msg_text) > 4000:
-        msg_text = msg_text[:3990] + "\n\n<i>...(сокращено из-за лимита длины)</i>"
+        msg_text = msg_text[:3990] + "\n\n<i>...(сокращено из-за лимита)</i>"
     return msg_text
 
 
