@@ -2,6 +2,7 @@ import time
 import re
 import html
 from typing import Dict, List, Optional, Any, Tuple
+from datetime import datetime, timedelta
 import httpx
 from bs4 import BeautifulSoup
 
@@ -32,7 +33,7 @@ XHR_HEADERS = {
 
 
 def normalize_string(s: str) -> str:
-    """Normalizes string for fuzzy search: lowercase, remove dashes, spaces, dots."""
+    """Normalizes string for search: lowercase, remove dashes, spaces, dots."""
     return re.sub(r"[\s\-_.\(\)]+", "", s.lower())
 
 
@@ -53,7 +54,6 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
                 selected = data.get("selected_date", today)
                 raw_dates = data.get("dates", [])
                 
-                # Format dates list
                 formatted_dates = []
                 for d in raw_dates:
                     dt = d.get("Date", "")
@@ -79,12 +79,20 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
         print(f"Error fetching dates: {e}")
 
     # Fallback if request fails
-    from datetime import date, timedelta
-    today_str = date.today().isoformat()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    fallback_dates = []
+    for i in range(-1, 5):
+        d_val = (datetime.now() + timedelta(days=i)).strftime("%Y-%m-%d")
+        fallback_dates.append({
+            "date": d_val,
+            "day_name": f"+{i} дн." if i != 0 else "Сегодня",
+            "label": d_val,
+            "is_today": i == 0
+        })
     return {
         "today": today_str,
         "selected": today_str,
-        "dates": [{"date": (date.today() + timedelta(days=i)).isoformat(), "label": f"+{i} дн.", "is_today": i == 0} for i in range(-2, 5)]
+        "dates": fallback_dates
     }
 
 
@@ -105,7 +113,6 @@ async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
                 raw_groups = data.get("groups", {})
                 
                 for key, val in raw_groups.items():
-                    # Only items that represent actual group dictionaries
                     if isinstance(val, dict) and "Name" in val:
                         g_id = str(val.get("id") or val.get("idGroup") or key)
                         name = val.get("Name", "").strip()
@@ -113,11 +120,16 @@ async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
                         is_sched = val.get("isSchedule", 1)
                         out_name = val.get("outName", name)
                         
+                        try:
+                            kurs_int = int(kurs)
+                        except (ValueError, TypeError):
+                            kurs_int = 1
+
                         groups_dict[g_id] = {
                             "id": g_id,
                             "name": name,
                             "out_name": out_name,
-                            "kurs": kurs,
+                            "kurs": kurs_int,
                             "is_schedule": is_sched
                         }
 
@@ -131,7 +143,7 @@ async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
     return _GROUPS_CACHE
 
 
-async def search_groups(query: str, limit: int = 20) -> List[Dict[str, Any]]:
+async def search_groups(query: str, limit: int = 15) -> List[Dict[str, Any]]:
     """Searches groups by name, course, or partial text."""
     all_groups = await get_groups()
     if not all_groups:
@@ -140,7 +152,6 @@ async def search_groups(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     clean_q = normalize_string(query)
     results = []
     
-    # 1. Exact or prefix matches first
     for g in all_groups.values():
         norm_name = normalize_string(g["name"])
         if norm_name == clean_q:
@@ -150,7 +161,7 @@ async def search_groups(query: str, limit: int = 20) -> List[Dict[str, Any]]:
         elif clean_q in norm_name:
             results.append(g)
 
-    # De-duplicate while preserving order
+    # De-duplicate while preserving priority
     seen = set()
     unique_results = []
     for g in results:
@@ -161,6 +172,14 @@ async def search_groups(query: str, limit: int = 20) -> List[Dict[str, Any]]:
                 break
 
     return unique_results
+
+
+async def get_groups_by_course(course: int) -> List[Dict[str, Any]]:
+    """Returns all active groups for a specific course (1-4)."""
+    all_groups = await get_groups()
+    result = [g for g in all_groups.values() if g.get("kurs") == course]
+    result.sort(key=lambda x: x["name"])
+    return result
 
 
 async def get_staffs(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
@@ -221,7 +240,6 @@ async def search_teachers(query: str, limit: int = 15) -> List[Dict[str, Any]]:
         if clean_q in norm_fio:
             results.append(s)
 
-    # Sort results alphabetically
     results.sort(key=lambda x: x["fio"])
     return results[:limit]
 
@@ -235,19 +253,24 @@ async def get_group_schedule(group_id: str, date_str: str) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
             resp = await client.get(url)
+            if resp.status_code != 200:
+                return {
+                    "success": False,
+                    "error": f"Сайт техникума вернул код ответа {resp.status_code}.",
+                    "lessons": []
+                }
             resp.encoding = "utf-8"
             soup = BeautifulSoup(resp.text, "html.parser")
     except Exception as e:
         return {
             "success": False,
-            "error": f"Ошибка соединения с сайтом техникума: {e}",
+            "error": f"Не удалось связаться с сайтом техникума: {e}",
             "lessons": []
         }
 
     header_div = soup.find("div", class_="header3")
     header_text = header_div.get_text(strip=True, separator=" ") if header_div else ""
 
-    # Check alert
     alerts = []
     for a in soup.find_all("div", class_=re.compile(r"alert")):
         t = a.get_text(strip=True)
@@ -312,11 +335,14 @@ async def get_group_schedule(group_id: str, date_str: str) -> Dict[str, Any]:
                 hw_tag = sdiv.find(string=re.compile(r"Д\.з:"))
                 if hw_tag:
                     hw = hw_tag.strip()
+                    # Clean prefix
+                    hw = re.sub(r"^Д\.з:\s*", "", hw).strip()
 
                 topic = ""
                 topic_tag = sdiv.find(string=re.compile(r"Тема:"))
                 if topic_tag:
                     topic = topic_tag.strip()
+                    topic = re.sub(r"^Тема:\s*", "", topic).strip()
 
                 if subj or teacher or aud:
                     key = (sub_label, subj, teacher, aud)
@@ -355,6 +381,12 @@ async def get_teacher_schedule(staff_id: str, date_str: str) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
             resp = await client.get(url)
+            if resp.status_code != 200:
+                return {
+                    "success": False,
+                    "error": f"Сайт вернул код ответа {resp.status_code}.",
+                    "lessons": []
+                }
             resp.encoding = "utf-8"
             soup = BeautifulSoup(resp.text, "html.parser")
     except Exception as e:
@@ -386,16 +418,13 @@ async def get_teacher_schedule(staff_id: str, date_str: str) -> Dict[str, Any]:
         time_span = card_header.find("span", class_="h4")
         pair_time = time_span.get_text(strip=True) if time_span else ""
         
-        # In body, teacher schedule has group info and subject info
         body_text = card_body.get_text(strip=True, separator=" ")
         
-        # Extract audience
         aud = ""
         aud_tag = card_body.find("a", href=re.compile(r"rooms\?idAudience"))
         if aud_tag:
             aud = aud_tag.get_text(strip=True)
             
-        # Extract group
         grp = ""
         grp_tag = card_body.find("a", href=re.compile(r"schedule/group"))
         if grp_tag:
@@ -424,7 +453,7 @@ def format_schedule_message(
     date_str: str,
     day_label: Optional[str] = None
 ) -> str:
-    """Formats group schedule into a rich Telegram HTML message."""
+    """Formats group schedule into a rich Telegram HTML message with safe character limits."""
     if not data.get("success", True):
         return f"⚠️ <b>Ошибка получения расписания:</b>\n{html.escape(data.get('error', 'Неизвестная ошибка'))}"
 
@@ -457,8 +486,6 @@ def format_schedule_message(
         p_num = l.get("pair", "")
         p_emoji = pair_emojis.get(p_num, "🔹")
         p_time = l.get("time", "")
-        
-        # Clean up time formatting (e.g. 11 20 - 12 40 -> 11:20 - 12:40)
         p_time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", p_time)
         
         lines.append(f"\n{p_emoji} <b>{html.escape(p_num)} пара</b> <code>[{html.escape(p_time_clean)}]</code>")
@@ -480,15 +507,24 @@ def format_schedule_message(
                         aud = f" 🚪 <i>(каб. {html.escape(aud_text)})</i>"
 
                 teach = f"\n   👤 {html.escape(item['teacher'])}" if item.get("teacher") else ""
-
                 lines.append(f"  • {sub}{subj}{aud}{teach}")
 
                 if item.get("homework"):
-                    lines.append(f"   📝 <b>Д/З:</b> <i>{html.escape(item['homework'])}</i>")
+                    hw_text = item['homework']
+                    if len(hw_text) > 300:
+                        hw_text = hw_text[:297] + "..."
+                    lines.append(f"   📝 <b>Д/З:</b> <i>{html.escape(hw_text)}</i>")
                 elif item.get("topic"):
-                    lines.append(f"   📖 <b>Тема:</b> <i>{html.escape(item['topic'])}</i>")
+                    top_text = item['topic']
+                    if len(top_text) > 200:
+                        top_text = top_text[:197] + "..."
+                    lines.append(f"   📖 <b>Тема:</b> <i>{html.escape(top_text)}</i>")
 
-    return "\n".join(lines)
+    msg_text = "\n".join(lines)
+    # Ensure message does not exceed Telegram 4096 character limit
+    if len(msg_text) > 4000:
+        msg_text = msg_text[:3990] + "\n\n<i>...(расписание сокращено из-за лимита)</i>"
+    return msg_text
 
 
 def format_teacher_schedule_message(
@@ -525,11 +561,14 @@ def format_teacher_schedule_message(
         if l.get("details"):
             lines.append(f"   ℹ️ <i>{html.escape(l['details'])}</i>")
 
-    return "\n".join(lines)
+    msg_text = "\n".join(lines)
+    if len(msg_text) > 4000:
+        msg_text = msg_text[:3990] + "\n\n<i>...(сокращено из-за лимита длины)</i>"
+    return msg_text
 
 
 def get_calls_text() -> str:
-    """Returns static and reliable звонки table."""
+    """Returns звонки table."""
     return (
         "🔔 <b>Расписание звонков ГАПОУ «АПТ»:</b>\n\n"
         "1️⃣ <b>I пара:</b> <code>08:00 – 09:20</code> <i>(перемена 10 мин)</i>\n"

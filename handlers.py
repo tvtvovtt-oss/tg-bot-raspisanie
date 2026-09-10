@@ -5,6 +5,7 @@ from typing import Optional
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -12,6 +13,7 @@ from database import get_user, set_user_group, set_user_teacher
 from parser import (
     get_available_dates,
     get_groups,
+    get_groups_by_course,
     search_groups,
     get_staffs,
     search_teachers,
@@ -25,6 +27,7 @@ from keyboards import (
     get_main_keyboard,
     get_dates_inline_keyboard,
     get_groups_search_inline_keyboard,
+    get_course_selection_keyboard,
     get_teachers_search_inline_keyboard,
     get_schedule_nav_inline_keyboard,
     get_teacher_schedule_nav_inline_keyboard,
@@ -49,18 +52,18 @@ async def cmd_start(message: Message, state: FSMContext):
     
     welcome_text = (
         f"👋 <b>Привет, {html.escape(first_name)}!</b>\n\n"
-        "Я официальный бот-помощник по расписанию <b>Альметьевского политехнического техникума</b> (almetpt.ru).\n\n"
+        "Я официальный бот по расписанию <b>Альметьевского политехнического техникума</b> (almetpt.ru).\n\n"
     )
 
     if user and user.get("group_name"):
         welcome_text += (
-            f"📌 Твоя выбранная группа: <b>{html.escape(user['group_name'])}</b>\n\n"
+            f"📌 Твоя сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n\n"
             "Выбирай нужное действие в меню ниже 👇"
         )
     else:
         welcome_text += (
             "⚠️ <b>Группа ещё не выбрана.</b>\n"
-            "Напиши номер своей группы (например, <code>АВ-261</code> или <code>БУР-261</code>), "
+            "Напиши номер своей группы в чат (например: <code>АВ-261</code> или <code>БУР-261</code>), "
             "или нажми <b>«🔍 Найти группу»</b>."
         )
 
@@ -71,14 +74,14 @@ async def cmd_start(message: Message, state: FSMContext):
 async def cmd_help(message: Message):
     text = (
         "📖 <b>Как пользоваться ботом:</b>\n\n"
-        "• <b>📅 На сегодня</b> — расписание твоей группы на текущий день\n"
-        "• <b>📆 На завтра</b> — расписание твоей группы на следующий день\n"
-        "• <b>🗓 Выбрать дату</b> — расписание на любой день недели\n"
-        "• <b>🔔 Звонки</b> — график и звонки пар\n"
+        "• <b>📅 На сегодня</b> — расписание твоей группы на сегодня\n"
+        "• <b>📆 На завтра</b> — расписание твоей группы на следующий учебный день\n"
+        "• <b>🗓 Выбрать дату</b> — расписание на любой доступный день недели\n"
+        "• <b>🔔 Звонки</b> — график звонков пар и перемен техникума\n"
         "• <b>👥 Моя группа</b> — посмотреть или изменить сохранённую группу\n"
-        "• <b>🔍 Найти группу</b> — поиск расписания любой группы техникума\n"
-        "• <b>👨‍🏫 Преподаватели</b> — поиск расписания преподавателя по фамилии\n\n"
-        "💡 <i>Ты также можешь просто отправить боту название группы в любой момент, например:</i> <code>АВ-261</code>"
+        "• <b>🔍 Найти группу</b> — поиск любой группы по названию или курсу\n"
+        "• <b>👨‍🏫 Преподаватели</b> — расписание преподавателя по фамилии\n\n"
+        "💡 <i>Подсказка: ты можешь просто отправить боту номер группы в любой момент, например:</i> <code>261</code> или <code>АВ-261</code>"
     )
     await message.answer(text, reply_markup=get_main_keyboard())
 
@@ -97,14 +100,13 @@ async def cmd_my_group(message: Message, state: FSMContext):
     if user and user.get("group_name"):
         text = (
             f"👤 <b>Твой профиль:</b>\n\n"
-            f"👥 Выбранная группа: <b>{html.escape(user['group_name'])}</b>\n"
-            f"🆔 ID группы: <code>{user.get('group_id')}</code>\n\n"
-            "Чтобы сменить группу, просто отправь её название сообщением или нажми <b>«🔍 Найти группу»</b>."
+            f"👥 Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n\n"
+            "Чтобы сменить группу, отправь её название в чат или нажми <b>«🔍 Найти группу»</b>."
         )
     else:
         text = (
-            "ℹ️ <b>Группа не сохранена!</b>\n\n"
-            "Напиши название группы в чат (например: <code>АВ-261</code>) или нажми кнопку <b>«🔍 Найти группу»</b>."
+            "ℹ️ <b>Группа пока не выбрана!</b>\n\n"
+            "Напиши название своей группы (например: <code>АВ-261</code>) или нажми <b>«🔍 Найти группу»</b>."
         )
     await message.answer(text, reply_markup=get_main_keyboard())
 
@@ -113,9 +115,11 @@ async def cmd_my_group(message: Message, state: FSMContext):
 @router.message(Command("search"))
 async def cmd_search_group(message: Message, state: FSMContext):
     await state.set_state(BotStates.waiting_for_group_search)
+    kb = get_course_selection_keyboard()
     await message.answer(
-        "🔎 Введи название группы (например: <code>АВ-261</code>, <code>261</code> или <code>БУР</code>):",
-        reply_markup=get_main_keyboard()
+        "🔎 Введи номер группы (например: <code>АВ-261</code>, <code>261</code>, <code>БУР</code>)\n"
+        "или выбери курс ниже:",
+        reply_markup=kb
     )
 
 
@@ -144,7 +148,7 @@ async def cmd_today(message: Message):
     dates_info = await get_available_dates()
     today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
 
-    wait_msg = await message.answer("⏳ <i>Загружаю расписание с сайта almetpt.ru...</i>")
+    wait_msg = await message.answer("⏳ <i>Загружаю расписание с almetpt.ru...</i>")
     sched = await get_group_schedule(user["group_id"], today_str)
     
     text = format_schedule_message(sched, user["group_name"], today_str, "Сегодня")
@@ -169,12 +173,29 @@ async def cmd_tomorrow(message: Message):
     dates_info = await get_available_dates()
     today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
     
-    # Calculate tomorrow or next available date
-    try:
-        dt = datetime.strptime(today_str, "%Y-%m-%d") + timedelta(days=1)
-        tomorrow_str = dt.strftime("%Y-%m-%d")
-    except Exception:
-        tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    # Smart next day detection:
+    # 1. Check if dates_info has a date after today
+    tomorrow_str = ""
+    dates_list = dates_info.get("dates", [])
+    found_today = False
+    for d in dates_list:
+        if d["date"] == today_str:
+            found_today = True
+            continue
+        if found_today:
+            tomorrow_str = d["date"]
+            break
+            
+    # 2. If not found in published list, calculate next calendar day (skip Sunday)
+    if not tomorrow_str:
+        try:
+            curr = datetime.strptime(today_str, "%Y-%m-%d")
+            next_day = curr + timedelta(days=1)
+            if next_day.weekday() == 6:  # Sunday
+                next_day += timedelta(days=1)
+            tomorrow_str = next_day.strftime("%Y-%m-%d")
+        except Exception:
+            tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     wait_msg = await message.answer("⏳ <i>Загружаю расписание на завтра...</i>")
     sched = await get_group_schedule(user["group_id"], tomorrow_str)
@@ -234,9 +255,8 @@ async def process_teacher_search_state(message: Message, state: FSMContext):
 
 @router.message(F.text)
 async def process_any_text(message: Message, state: FSMContext):
-    """Fallback text handler: if user enters group name directly in chat."""
+    """Fallback handler: if user directly enters group name in chat."""
     text = message.text.strip()
-    # If text is not a command and looks like a group search (short string with letters or numbers)
     if len(text) <= 25:
         groups = await search_groups(text)
         if groups:
@@ -262,7 +282,6 @@ async def handle_group_search_query(message: Message, query: str, preloaded_grou
         return
 
     if len(groups) == 1:
-        # Exactly one group found
         g = groups[0]
         await set_user_group(
             user_id=message.from_user.id,
@@ -284,8 +303,7 @@ async def handle_group_search_query(message: Message, query: str, preloaded_grou
         await message.answer(text, reply_markup=kb)
         return
 
-    # Multiple groups found
-    kb = get_groups_search_inline_keyboard(groups, query=query)
+    kb = get_groups_search_inline_keyboard(groups)
     await message.answer(
         f"🔍 <b>Найдено групп: {len(groups)}</b>\nВыбери свою группу:",
         reply_markup=kb
@@ -298,9 +316,24 @@ async def handle_group_search_query(message: Message, query: str, preloaded_grou
 async def cb_group_handler(query: CallbackQuery, callback_data: GroupCallback):
     await query.answer()
     
+    if callback_data.action == "course":
+        course_num = callback_data.course
+        groups = await get_groups_by_course(course_num)
+        if not groups:
+            await query.message.answer(f"Группы для {course_num} курса не найдены.")
+            return
+        kb = get_groups_search_inline_keyboard(groups)
+        await query.message.edit_text(
+            f"🎓 <b>Группы {course_num} курса ({len(groups)}):</b>\nВыбери свою группу:",
+            reply_markup=kb
+        )
+        return
+
     if callback_data.action == "select":
         g_id = callback_data.group_id
-        g_name = callback_data.group_name
+        all_groups = await get_groups()
+        g_info = all_groups.get(g_id, {})
+        g_name = g_info.get("name", "Группа")
         
         await set_user_group(
             user_id=query.from_user.id,
@@ -313,25 +346,24 @@ async def cb_group_handler(query: CallbackQuery, callback_data: GroupCallback):
         dates_info = await get_available_dates()
         today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
         
-        await query.message.edit_text(f"⏳ <i>Загружаю расписание группы {html.escape(g_name)}...</i>")
+        try:
+            await query.message.edit_text(f"⏳ <i>Загружаю расписание группы {html.escape(g_name)}...</i>")
+        except TelegramBadRequest:
+            pass
+
         sched = await get_group_schedule(g_id, today_str)
-        
         text = format_schedule_message(sched, g_name, today_str, "Сегодня")
         web_url = sched.get("url")
         kb = get_schedule_nav_inline_keyboard(g_id, today_str, web_url)
         
-        await query.message.edit_text(text, reply_markup=kb)
-
-    elif callback_data.action == "page":
-        # Paginate
-        groups = list((await get_groups()).values())
-        kb = get_groups_search_inline_keyboard(groups, page=callback_data.page)
-        await query.message.edit_reply_markup(reply_markup=kb)
+        try:
+            await query.message.edit_text(text, reply_markup=kb)
+        except TelegramBadRequest:
+            pass
 
 
 @router.callback_query(DateCallback.filter())
 async def cb_date_handler(query: CallbackQuery, callback_data: DateCallback):
-    await query.answer()
     action = callback_data.action
     target_type = callback_data.target_type
     target_id = callback_data.target_id
@@ -343,67 +375,76 @@ async def cb_date_handler(query: CallbackQuery, callback_data: DateCallback):
         if user and user.get("group_id"):
             target_id = user["group_id"]
         else:
-            await query.message.answer("⚠️ Сначала выбери группу в меню.")
+            await query.answer("⚠️ Сначала выбери группу в меню.", show_alert=True)
             return
 
     if action == "nav":
-        # User wants to choose another date
         dates_info = await get_available_dates()
         dates_list = dates_info.get("dates", [])
         kb = get_dates_inline_keyboard(dates_list, target_type=target_type, target_id=target_id)
-        await query.message.edit_reply_markup(reply_markup=kb)
+        try:
+            await query.message.edit_reply_markup(reply_markup=kb)
+            await query.answer()
+        except TelegramBadRequest:
+            await query.answer()
         return
 
     if action == "pick":
-        # User picked a specific date
         if target_type == "teacher":
             all_staff = await get_staffs()
             t_info = all_staff.get(target_id, {})
             t_name = t_info.get("short_fio") or t_info.get("fio", "Преподаватель")
             
-            await query.message.edit_text(f"⏳ <i>Загружаю расписание {html.escape(t_name)} на {date_str}...</i>")
             sched = await get_teacher_schedule(target_id, date_str)
             text = format_teacher_schedule_message(sched, t_name, date_str)
             web_url = sched.get("url")
             kb = get_teacher_schedule_nav_inline_keyboard(target_id, date_str, web_url)
-            await query.message.edit_text(text, reply_markup=kb)
+            try:
+                await query.message.edit_text(text, reply_markup=kb)
+                await query.answer("Расписание обновлено!")
+            except TelegramBadRequest:
+                await query.answer("Расписание актуально, изменений нет.")
         else:
             all_groups = await get_groups()
             g_info = all_groups.get(target_id, {})
             g_name = g_info.get("name", "Группа")
             
-            await query.message.edit_text(f"⏳ <i>Загружаю расписание группы {html.escape(g_name)} на {date_str}...</i>")
             sched = await get_group_schedule(target_id, date_str)
             text = format_schedule_message(sched, g_name, date_str)
             web_url = sched.get("url")
             kb = get_schedule_nav_inline_keyboard(target_id, date_str, web_url)
-            await query.message.edit_text(text, reply_markup=kb)
+            try:
+                await query.message.edit_text(text, reply_markup=kb)
+                await query.answer("Расписание обновлено!")
+            except TelegramBadRequest:
+                await query.answer("Расписание актуально, изменений нет.")
 
 
 @router.callback_query(TeacherCallback.filter())
 async def cb_teacher_handler(query: CallbackQuery, callback_data: TeacherCallback):
-    await query.answer()
-    
     if callback_data.action == "select":
         t_id = callback_data.teacher_id
-        t_name = callback_data.teacher_name
+        all_staff = await get_staffs()
+        t_info = all_staff.get(t_id, {})
+        t_name = t_info.get("short_fio") or t_info.get("fio", "Преподаватель")
         
         await set_user_teacher(query.from_user.id, t_id, t_name)
         
         dates_info = await get_available_dates()
         today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
         
-        await query.message.edit_text(f"⏳ <i>Загружаю расписание преподавателя {html.escape(t_name)}...</i>")
+        try:
+            await query.message.edit_text(f"⏳ <i>Загружаю расписание {html.escape(t_name)}...</i>")
+        except TelegramBadRequest:
+            pass
+
         sched = await get_teacher_schedule(t_id, today_str)
-        
         text = format_teacher_schedule_message(sched, t_name, today_str)
         web_url = sched.get("url")
         kb = get_teacher_schedule_nav_inline_keyboard(t_id, today_str, web_url)
         
-        await query.message.edit_text(text, reply_markup=kb)
-
-    elif callback_data.action == "page":
-        all_teachers = list((await get_staffs()).values())
-        teachers = [t for t in all_teachers if t.get("is_teacher", 1)]
-        kb = get_teachers_search_inline_keyboard(teachers, page=callback_data.page)
-        await query.message.edit_reply_markup(reply_markup=kb)
+        try:
+            await query.message.edit_text(text, reply_markup=kb)
+            await query.answer()
+        except TelegramBadRequest:
+            await query.answer()
