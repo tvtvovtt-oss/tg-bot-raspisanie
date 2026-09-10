@@ -74,17 +74,17 @@ async def safe_edit_text(message: Message, text: str, reply_markup=None):
 def build_welcome_text(user, first_name: str) -> str:
     base = (
         f"{te(PE_BOT)} <b>Привет, {html.escape(first_name)}!</b>\n\n"
-        "Я официальный бот по расписанию <b>Альметьевского политехнического техникума</b> (almetpt.ru).\n\n"
+        "Здесь актуальное расписание пар АПТ.\n\n"
     )
     if user and user.get("group_name"):
         base += (
-            f"{te(PE_CHECK)} Твоя сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n\n"
-            "Выбирай нужное действие кнопками ниже или отправь номер другой группы в чат:"
+            f"{te(PE_CHECK)} Твоя группа: <b>{html.escape(user['group_name'])}</b>\n\n"
+            "Выбирай действие кнопками ниже или отправь номер другой группы в чат:"
         )
     else:
         base += (
-            f"{te(PE_WARNING, '!')} <b>Группа ещё не выбрана.</b>\n"
-            "Просто отправь в чат номер или первые буквы группы (например: <code>253</code> или <code>ИС</code>)."
+            f"{te(PE_INFO)} <b>Группа ещё не выбрана.</b>\n"
+            "Просто напиши в чат номер или первые буквы группы (например: <code>253</code> или <code>ИС</code>)."
         )
     return base
 
@@ -92,12 +92,12 @@ def build_welcome_text(user, first_name: str) -> str:
 def get_menu_text(user) -> str:
     if user and user.get("group_name"):
         return (
-            f"{te(PE_HOUSE)} <b>Главное меню</b> — группа: <b>{html.escape(user['group_name'])}</b>\n"
-            "Выбери нужное действие кнопками:"
+            f"{te(PE_HOUSE)} <b>Главное меню</b> — {html.escape(user['group_name'])}:\n"
+            "Выбирай действие кнопками:"
         )
     return (
-        f"{te(PE_HOUSE)} <b>Главное меню</b>\n"
-        "Выбери нужное действие кнопками или напиши номер группы:"
+        f"{te(PE_HOUSE)} <b>Главное меню</b>:\n"
+        "Выбирай действие кнопками или напиши номер группы:"
     )
 
 
