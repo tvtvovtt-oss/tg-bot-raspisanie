@@ -1,0 +1,543 @@
+import time
+import re
+import html
+from typing import Dict, List, Optional, Any, Tuple
+import httpx
+from bs4 import BeautifulSoup
+
+from config import ALMETPT_BASE_URL
+
+# Caching containers
+_GROUPS_CACHE: Dict[str, Any] = {}
+_GROUPS_CACHE_TIME: float = 0
+_STAFFS_CACHE: Dict[str, Any] = {}
+_STAFFS_CACHE_TIME: float = 0
+_DATES_CACHE: Dict[str, Any] = {}
+_DATES_CACHE_TIME: float = 0
+
+CACHE_TTL_GROUPS = 1800   # 30 minutes
+CACHE_TTL_STAFFS = 1800   # 30 minutes
+CACHE_TTL_DATES = 300     # 5 minutes
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/html, */*",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+}
+
+XHR_HEADERS = {
+    **HEADERS,
+    "X-Requested-With": "XMLHttpRequest"
+}
+
+
+def normalize_string(s: str) -> str:
+    """Normalizes string for fuzzy search: lowercase, remove dashes, spaces, dots."""
+    return re.sub(r"[\s\-_.\(\)]+", "", s.lower())
+
+
+async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
+    """Fetches available schedule dates from /2020/schedule/dates"""
+    global _DATES_CACHE, _DATES_CACHE_TIME
+    now_ts = time.time()
+    if not force_refresh and _DATES_CACHE and (now_ts - _DATES_CACHE_TIME < CACHE_TTL_DATES):
+        return _DATES_CACHE
+
+    url = f"{ALMETPT_BASE_URL}/2020/schedule/dates"
+    try:
+        async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=12.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                today = data.get("now", "")
+                selected = data.get("selected_date", today)
+                raw_dates = data.get("dates", [])
+                
+                # Format dates list
+                formatted_dates = []
+                for d in raw_dates:
+                    dt = d.get("Date", "")
+                    day_name = d.get("name", "") or d.get("Value", "")
+                    day_label = d.get("day", dt)
+                    is_today = (dt == today)
+                    formatted_dates.append({
+                        "date": dt,
+                        "day_name": day_name,
+                        "label": day_label,
+                        "is_today": is_today
+                    })
+
+                result = {
+                    "today": today,
+                    "selected": selected,
+                    "dates": formatted_dates
+                }
+                _DATES_CACHE = result
+                _DATES_CACHE_TIME = now_ts
+                return result
+    except Exception as e:
+        print(f"Error fetching dates: {e}")
+
+    # Fallback if request fails
+    from datetime import date, timedelta
+    today_str = date.today().isoformat()
+    return {
+        "today": today_str,
+        "selected": today_str,
+        "dates": [{"date": (date.today() + timedelta(days=i)).isoformat(), "label": f"+{i} дн.", "is_today": i == 0} for i in range(-2, 5)]
+    }
+
+
+async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Fetches and parses list of all groups from /2020/json/groups"""
+    global _GROUPS_CACHE, _GROUPS_CACHE_TIME
+    now_ts = time.time()
+    if not force_refresh and _GROUPS_CACHE and (now_ts - _GROUPS_CACHE_TIME < CACHE_TTL_GROUPS):
+        return _GROUPS_CACHE
+
+    url = f"{ALMETPT_BASE_URL}/2020/json/groups"
+    try:
+        async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                groups_dict = {}
+                raw_groups = data.get("groups", {})
+                
+                for key, val in raw_groups.items():
+                    # Only items that represent actual group dictionaries
+                    if isinstance(val, dict) and "Name" in val:
+                        g_id = str(val.get("id") or val.get("idGroup") or key)
+                        name = val.get("Name", "").strip()
+                        kurs = val.get("Kurs") or val.get("realCourse") or 1
+                        is_sched = val.get("isSchedule", 1)
+                        out_name = val.get("outName", name)
+                        
+                        groups_dict[g_id] = {
+                            "id": g_id,
+                            "name": name,
+                            "out_name": out_name,
+                            "kurs": kurs,
+                            "is_schedule": is_sched
+                        }
+
+                if groups_dict:
+                    _GROUPS_CACHE = groups_dict
+                    _GROUPS_CACHE_TIME = now_ts
+                    return groups_dict
+    except Exception as e:
+        print(f"Error fetching groups: {e}")
+
+    return _GROUPS_CACHE
+
+
+async def search_groups(query: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Searches groups by name, course, or partial text."""
+    all_groups = await get_groups()
+    if not all_groups:
+        return []
+
+    clean_q = normalize_string(query)
+    results = []
+    
+    # 1. Exact or prefix matches first
+    for g in all_groups.values():
+        norm_name = normalize_string(g["name"])
+        if norm_name == clean_q:
+            results.insert(0, g)
+        elif norm_name.startswith(clean_q):
+            results.append(g)
+        elif clean_q in norm_name:
+            results.append(g)
+
+    # De-duplicate while preserving order
+    seen = set()
+    unique_results = []
+    for g in results:
+        if g["id"] not in seen:
+            seen.add(g["id"])
+            unique_results.append(g)
+            if len(unique_results) >= limit:
+                break
+
+    return unique_results
+
+
+async def get_staffs(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Fetches list of teachers/staff from /2020/json/staffs"""
+    global _STAFFS_CACHE, _STAFFS_CACHE_TIME
+    now_ts = time.time()
+    if not force_refresh and _STAFFS_CACHE and (now_ts - _STAFFS_CACHE_TIME < CACHE_TTL_STAFFS):
+        return _STAFFS_CACHE
+
+    url = f"{ALMETPT_BASE_URL}/2020/json/staffs"
+    try:
+        async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                staffs_dict = {}
+                raw_staffs = data.get("staffs", {})
+                
+                for key, val in raw_staffs.items():
+                    if isinstance(val, dict):
+                        s_id = str(val.get("id") or val.get("idStaff") or key)
+                        family = val.get("Family", "").strip()
+                        name = val.get("Name", "").strip()
+                        father = val.get("Father", "").strip()
+                        fio = f"{family} {name} {father}".strip()
+                        short_fio = f"{family} {name[:1]}.{father[:1]}." if name and father else fio
+                        
+                        staffs_dict[s_id] = {
+                            "id": s_id,
+                            "fio": fio,
+                            "short_fio": short_fio,
+                            "is_teacher": val.get("isTeacher", 0)
+                        }
+
+                if staffs_dict:
+                    _STAFFS_CACHE = staffs_dict
+                    _STAFFS_CACHE_TIME = now_ts
+                    return staffs_dict
+    except Exception as e:
+        print(f"Error fetching staffs: {e}")
+
+    return _STAFFS_CACHE
+
+
+async def search_teachers(query: str, limit: int = 15) -> List[Dict[str, Any]]:
+    """Searches teachers by surname or full name."""
+    all_staff = await get_staffs()
+    if not all_staff:
+        return []
+
+    clean_q = normalize_string(query)
+    results = []
+    
+    for s in all_staff.values():
+        if not s.get("is_teacher", 1):
+            continue
+        norm_fio = normalize_string(s["fio"])
+        if clean_q in norm_fio:
+            results.append(s)
+
+    # Sort results alphabetically
+    results.sort(key=lambda x: x["fio"])
+    return results[:limit]
+
+
+async def get_group_schedule(group_id: str, date_str: str) -> Dict[str, Any]:
+    """
+    Parses schedule for a specific group and date.
+    URL: /2020/site/schedule/group/{group_id}/{date_str}
+    """
+    url = f"{ALMETPT_BASE_URL}/2020/site/schedule/group/{group_id}/{date_str}"
+    try:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.encoding = "utf-8"
+            soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Ошибка соединения с сайтом техникума: {e}",
+            "lessons": []
+        }
+
+    header_div = soup.find("div", class_="header3")
+    header_text = header_div.get_text(strip=True, separator=" ") if header_div else ""
+
+    # Check alert
+    alerts = []
+    for a in soup.find_all("div", class_=re.compile(r"alert")):
+        t = a.get_text(strip=True)
+        if "cookie" not in t.lower():
+            alerts.append(t)
+
+    cards = soup.find_all("div", class_="myCard")
+    lessons = []
+    
+    for card in cards:
+        card_header = card.find("div", class_="card-header")
+        if not card_header:
+            continue
+        
+        pair_span = card_header.find("span", class_="h3")
+        pair_num = pair_span.get_text(strip=True) if pair_span else ""
+        time_span = card_header.find("span", class_="h4")
+        pair_time = time_span.get_text(strip=True) if time_span else ""
+        if not pair_num and not pair_time:
+            continue
+        
+        card_body = card.find("div", class_="card-body")
+        subgroup_rows = []
+        if card_body:
+            sub_divs = card_body.find_all("div", class_=re.compile(r"subGroup\d+|d-flex flex-column"))
+            if not sub_divs:
+                sub_divs = [card_body]
+            
+            seen_items = set()
+            for sdiv in sub_divs:
+                sub_label = ""
+                for sp in sdiv.find_all("span", class_="rounded"):
+                    t = sp.get_text(strip=True)
+                    if "п/гр" in t:
+                        sub_label = t
+                        break
+                
+                aud = ""
+                aud_tag = sdiv.find("a", href=re.compile(r"rooms\?idAudience"))
+                if aud_tag:
+                    aud = aud_tag.get_text(strip=True)
+                
+                teacher = ""
+                staff_tag = sdiv.find("span", class_="Staff")
+                if staff_tag:
+                    teacher = staff_tag.get("title") or staff_tag.get_text(strip=True)
+                
+                subj = ""
+                b_tag = sdiv.find("b")
+                if b_tag:
+                    subj = b_tag.get_text(strip=True)
+                else:
+                    changes = sdiv.find_all(class_="changesPair")
+                    for ch in changes:
+                        if "Staff" not in ch.get("class", []):
+                            t = ch.get_text(strip=True)
+                            if t and t not in (teacher, aud):
+                                subj = t
+                                break
+                
+                hw = ""
+                hw_tag = sdiv.find(string=re.compile(r"Д\.з:"))
+                if hw_tag:
+                    hw = hw_tag.strip()
+
+                topic = ""
+                topic_tag = sdiv.find(string=re.compile(r"Тема:"))
+                if topic_tag:
+                    topic = topic_tag.strip()
+
+                if subj or teacher or aud:
+                    key = (sub_label, subj, teacher, aud)
+                    if key not in seen_items:
+                        seen_items.add(key)
+                        subgroup_rows.append({
+                            "subgroup": sub_label,
+                            "subject": subj,
+                            "teacher": teacher,
+                            "audience": aud,
+                            "homework": hw,
+                            "topic": topic
+                        })
+
+        lessons.append({
+            "pair": pair_num,
+            "time": pair_time,
+            "items": subgroup_rows
+        })
+
+    return {
+        "success": True,
+        "url": url,
+        "header": header_text,
+        "alerts": alerts,
+        "lessons": lessons
+    }
+
+
+async def get_teacher_schedule(staff_id: str, date_str: str) -> Dict[str, Any]:
+    """
+    Parses schedule for a teacher on date_str.
+    URL: /2020/site/schedule/staff/{staff_id}/{date_str}
+    """
+    url = f"{ALMETPT_BASE_URL}/2020/site/schedule/staff/{staff_id}/{date_str}"
+    try:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.encoding = "utf-8"
+            soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Ошибка соединения с сайтом: {e}",
+            "lessons": []
+        }
+
+    header_div = soup.find("div", class_="header3")
+    header_text = header_div.get_text(strip=True, separator=" ") if header_div else ""
+
+    alerts = []
+    for a in soup.find_all("div", class_=re.compile(r"alert")):
+        t = a.get_text(strip=True)
+        if "cookie" not in t.lower():
+            alerts.append(t)
+
+    cards = soup.find_all("div", class_="myCard")
+    lessons = []
+    for card in cards:
+        card_header = card.find("div", class_="card-header")
+        card_body = card.find("div", class_="card-body")
+        if not card_header or not card_body:
+            continue
+        
+        pair_span = card_header.find("span", class_="h3")
+        pair_num = pair_span.get_text(strip=True) if pair_span else ""
+        time_span = card_header.find("span", class_="h4")
+        pair_time = time_span.get_text(strip=True) if time_span else ""
+        
+        # In body, teacher schedule has group info and subject info
+        body_text = card_body.get_text(strip=True, separator=" ")
+        
+        # Extract audience
+        aud = ""
+        aud_tag = card_body.find("a", href=re.compile(r"rooms\?idAudience"))
+        if aud_tag:
+            aud = aud_tag.get_text(strip=True)
+            
+        # Extract group
+        grp = ""
+        grp_tag = card_body.find("a", href=re.compile(r"schedule/group"))
+        if grp_tag:
+            grp = grp_tag.get_text(strip=True)
+
+        lessons.append({
+            "pair": pair_num,
+            "time": pair_time,
+            "audience": aud,
+            "group": grp,
+            "details": body_text
+        })
+
+    return {
+        "success": True,
+        "url": url,
+        "header": header_text,
+        "alerts": alerts,
+        "lessons": lessons
+    }
+
+
+def format_schedule_message(
+    data: Dict[str, Any],
+    group_name: str,
+    date_str: str,
+    day_label: Optional[str] = None
+) -> str:
+    """Formats group schedule into a rich Telegram HTML message."""
+    if not data.get("success", True):
+        return f"⚠️ <b>Ошибка получения расписания:</b>\n{html.escape(data.get('error', 'Неизвестная ошибка'))}"
+
+    lines = []
+    header_title = data.get("header") or f"Расписание группы {group_name}"
+    lines.append(f"📚 <b>{html.escape(header_title)}</b>")
+    
+    if day_label:
+        lines.append(f"🗓 <b>Дата:</b> <code>{html.escape(date_str)}</code> ({html.escape(day_label)})")
+    else:
+        lines.append(f"🗓 <b>Дата:</b> <code>{html.escape(date_str)}</code>")
+
+    lines.append("────────────────────")
+
+    lessons = data.get("lessons", [])
+    if not lessons:
+        alerts = data.get("alerts", [])
+        if alerts:
+            lines.append(f"\nℹ️ <i>{html.escape(alerts[0])}</i>")
+        else:
+            lines.append("\n🎉 <b>Пар нет!</b> В этот день занятия отсутствуют или расписание ещё не опубликовано.")
+        return "\n".join(lines)
+
+    pair_emojis = {
+        "I": "1️⃣", "II": "2️⃣", "III": "3️⃣", "IV": "4️⃣",
+        "V": "5️⃣", "VI": "6️⃣", "VII": "7️⃣", "VIII": "8️⃣"
+    }
+
+    for l in lessons:
+        p_num = l.get("pair", "")
+        p_emoji = pair_emojis.get(p_num, "🔹")
+        p_time = l.get("time", "")
+        
+        # Clean up time formatting (e.g. 11 20 - 12 40 -> 11:20 - 12:40)
+        p_time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", p_time)
+        
+        lines.append(f"\n{p_emoji} <b>{html.escape(p_num)} пара</b> <code>[{html.escape(p_time_clean)}]</code>")
+
+        items = l.get("items", [])
+        if not items:
+            lines.append("   <i>Занятие не указано</i>")
+        else:
+            for item in items:
+                sub = f"<b>[{html.escape(item['subgroup'])}]</b> " if item.get("subgroup") else ""
+                subj = f"<b>{html.escape(item['subject'])}</b>" if item.get("subject") else "<i>Предмет не указан</i>"
+                
+                aud = ""
+                if item.get("audience"):
+                    aud_text = item["audience"]
+                    if "on-line" in aud_text.lower():
+                        aud = " 🌐 <i>(дистант)</i>"
+                    else:
+                        aud = f" 🚪 <i>(каб. {html.escape(aud_text)})</i>"
+
+                teach = f"\n   👤 {html.escape(item['teacher'])}" if item.get("teacher") else ""
+
+                lines.append(f"  • {sub}{subj}{aud}{teach}")
+
+                if item.get("homework"):
+                    lines.append(f"   📝 <b>Д/З:</b> <i>{html.escape(item['homework'])}</i>")
+                elif item.get("topic"):
+                    lines.append(f"   📖 <b>Тема:</b> <i>{html.escape(item['topic'])}</i>")
+
+    return "\n".join(lines)
+
+
+def format_teacher_schedule_message(
+    data: Dict[str, Any],
+    teacher_name: str,
+    date_str: str
+) -> str:
+    """Formats teacher schedule into Telegram HTML."""
+    if not data.get("success", True):
+        return f"⚠️ <b>Ошибка:</b>\n{html.escape(data.get('error', ''))}"
+
+    lines = []
+    lines.append(f"👨‍🏫 <b>Расписание преподавателя:</b>\n<b>{html.escape(teacher_name)}</b>")
+    lines.append(f"🗓 <b>Дата:</b> <code>{html.escape(date_str)}</code>")
+    lines.append("────────────────────")
+
+    lessons = data.get("lessons", [])
+    if not lessons:
+        lines.append("\n🎉 <b>Пар нет!</b> В этот день у преподавателя нет занятий.")
+        return "\n".join(lines)
+
+    for l in lessons:
+        p_num = l.get("pair", "")
+        p_time = l.get("time", "")
+        p_time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", p_time)
+        
+        lines.append(f"\n🔹 <b>{html.escape(p_num)} пара</b> <code>[{html.escape(p_time_clean)}]</code>")
+        if l.get("group"):
+            lines.append(f"   👥 Группа: <b>{html.escape(l['group'])}</b>")
+        if l.get("audience"):
+            aud = l['audience']
+            aud_str = "🌐 Дистант" if "on-line" in aud.lower() else f"🚪 Каб. {aud}"
+            lines.append(f"   {aud_str}")
+        if l.get("details"):
+            lines.append(f"   ℹ️ <i>{html.escape(l['details'])}</i>")
+
+    return "\n".join(lines)
+
+
+def get_calls_text() -> str:
+    """Returns static and reliable звонки table."""
+    return (
+        "🔔 <b>Расписание звонков ГАПОУ «АПТ»:</b>\n\n"
+        "1️⃣ <b>I пара:</b> <code>08:00 – 09:20</code> <i>(перемена 10 мин)</i>\n"
+        "2️⃣ <b>II пара:</b> <code>09:30 – 10:50</code> <i>(большая перемена 30 мин)</i>\n"
+        "3️⃣ <b>III пара:</b> <code>11:20 – 12:40</code> <i>(перемена 10 мин)</i>\n"
+        "4️⃣ <b>IV пара:</b> <code>12:50 – 14:10</code> <i>(перемена 10 мин)</i>\n"
+        "5️⃣ <b>V пара:</b> <code>14:20 – 15:40</code> <i>(перемена 10 мин)</i>\n"
+        "6️⃣ <b>VI пара:</b> <code>15:50 – 17:10</code> <i>(перемена 5 мин)</i>\n"
+        "7️⃣ <b>VII пара:</b> <code>17:15 – 18:35</code> <i>(перемена 5 мин)</i>\n"
+        "8️⃣ <b>VIII пара:</b> <code>18:40 – 20:00</code>"
+    )

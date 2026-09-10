@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: almetpt_schedule_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./bot.db:/app/bot.db
