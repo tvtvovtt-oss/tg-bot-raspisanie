@@ -1038,7 +1038,7 @@ def is_schedule_published(sched: Optional[Dict[str, Any]]) -> bool:
     Returns False if:
       - Request failed (!success)
       - The site explicitly says 'не опубликовано'
-      - There are no lessons
+      - There are no lessons, practices, or consultations
     """
     if not sched or not sched.get("success", True):
         return False
@@ -1049,7 +1049,8 @@ def is_schedule_published(sched: Optional[Dict[str, Any]]) -> bool:
             return False
     lessons = sched.get("lessons", [])
     practices = sched.get("practices", [])
-    if not lessons and not practices:
+    consultations = sched.get("consultations", [])
+    if not lessons and not practices and not consultations:
         return False
     return bool(sched.get("is_published", True))
 
@@ -1102,6 +1103,26 @@ STANDARD_BREAKS = {
     6: 5,
     7: 5
 }
+
+
+def safe_join_lines(lines: List[str], max_len: int = 3800) -> str:
+    """
+    Безопасно объединяет строки сообщения, гарантируя непревышение лимита Telegram (4096 символов).
+    Обрезает ТОЛЬКО по целым строкам, чтобы не повредить HTML-теги (<tg-emoji>, <b>, <i>).
+    """
+    total_len = 0
+    safe_lines = []
+    truncated = False
+    for line in lines:
+        if total_len + len(line) + 1 > max_len:
+            truncated = True
+            break
+        safe_lines.append(line)
+        total_len += len(line) + 1
+
+    if truncated:
+        safe_lines.append(f"\n{te(PE_INFO)} <i>...(сокращено из-за лимита Telegram)</i>")
+    return "\n".join(safe_lines).strip()
 
 
 def format_schedule_message(
@@ -1270,10 +1291,7 @@ def format_schedule_message(
 
         lines.append("")  # Empty line between pairs
 
-    msg_text = "\n".join(lines).strip()
-    if len(msg_text) > 4000:
-        msg_text = msg_text[:3990] + "\n\n<i>...(расписание сокращено из-за лимита)</i>"
-    return msg_text
+    return safe_join_lines(lines)
 
 
 def format_teacher_schedule_message(
@@ -1389,10 +1407,7 @@ def format_teacher_schedule_message(
 
         lines.append("")
 
-    msg_text = "\n".join(lines).strip()
-    if len(msg_text) > 4000:
-        msg_text = msg_text[:3990] + "\n\n<i>...(сокращено из-за лимита)</i>"
-    return msg_text
+    return safe_join_lines(lines)
 
 
 def get_calls_text() -> str:

@@ -8,7 +8,7 @@ load_dotenv(BASE_DIR / ".env")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ALMETPT_BASE_URL = os.getenv("ALMETPT_BASE_URL", "https://almetpt.ru").rstrip("/")
 DATABASE_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "bot.db"))
-PROXY_URL = os.getenv("PROXY_URL", os.getenv("HTTPS_PROXY", os.getenv("HTTP_PROXY", "")))
+PROXY_URL = os.getenv("PROXY_URL", os.getenv("BOT_PROXY", "")).strip()
 
 
 def parse_admin_ids(raw_str: str) -> list[int]:

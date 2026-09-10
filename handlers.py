@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from database import (
-    get_user, set_user_group, set_user_teacher, toggle_user_notifications,
+    get_user, ensure_user, set_user_group, set_user_teacher, toggle_user_notifications,
     is_admin, is_maintenance_mode, set_maintenance_mode, get_bot_stats, get_all_user_ids
 )
 from parser import (
@@ -154,12 +154,40 @@ def get_menu_text(user) -> str:
     )
 
 
+def render_profile_text(user: Optional[dict]) -> str:
+    """Формирует понятный текст профиля пользователя с группой и преподавателем."""
+    notifications_on = True if (not user or user.get("notifications") is None or user.get("notifications") == 1) else False
+    notif_status_text = "Включены" if notifications_on else "Отключены"
+    notif_icon = te(PE_BELL) if notifications_on else te(PE_CROSS)
+
+    lines = [f"{te(PE_PEOPLE)} <b>Твой профиль:</b>\n"]
+    has_target = False
+    if user and user.get("group_name"):
+        lines.append(f"{te(PE_CHECK)} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>")
+        has_target = True
+    if user and user.get("teacher_name"):
+        lines.append(f"{te(PE_PERSON_CHECK)} Сохранённый преподаватель: <b>{html.escape(user['teacher_name'])}</b>")
+        has_target = True
+    
+    if not has_target:
+        lines.append(f"{te(PE_INFO)} <i>Группа пока не выбрана!</i>")
+
+    lines.append(f"{notif_icon} Уведомления о расписании: <b>{notif_status_text}</b>\n")
+    lines.append("Чтобы сменить группу, нажми <b>«Сменить группу»</b> или просто напиши её номер в чат.")
+    return "\n".join(lines)
+
+
 # ---------- Команды ----------
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     """Единственная нужная команда: дальше всё управление только кнопками."""
     await state.clear()
+    await ensure_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name
+    )
     user = await get_user(message.from_user.id)
     first_name = message.from_user.first_name or "студент"
     is_adm = await is_admin(message.from_user.id)
@@ -199,21 +227,7 @@ async def cmd_my_group(message: Message, state: FSMContext):
     await state.clear()
     user = await get_user(message.from_user.id)
     notifications_on = True if (not user or user.get("notifications") is None or user.get("notifications") == 1) else False
-    notif_status_text = "Включены" if notifications_on else "Отключены"
-    notif_icon = te(PE_BELL) if notifications_on else te(PE_CROSS)
-    if user and user.get("group_name"):
-        text = (
-            f"{te(PE_PEOPLE)} <b>Твой профиль:</b>\n\n"
-            f"{te(PE_CHECK)} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n"
-            f"{notif_icon} Уведомления о расписании: <b>{notif_status_text}</b>\n\n"
-            "Чтобы сменить группу, нажми <b>«Сменить группу»</b> или просто отправь её номер в чат."
-        )
-    else:
-        text = (
-            f"{te(PE_INFO)} <b>Группа пока не выбрана!</b>\n\n"
-            f"{notif_icon} Уведомления: <b>{notif_status_text}</b>\n\n"
-            "Нажми <b>«Сменить группу»</b> ниже, чтобы выбрать курс кнопками."
-        )
+    text = render_profile_text(user)
     await safe_answer(message, text, reply_markup=get_my_group_keyboard(notifications_on))
 
 
@@ -272,11 +286,11 @@ async def cmd_today(message: Message):
     kb = get_schedule_nav_inline_keyboard(user["group_id"], today_str, web_url)
     
     if wait_msg:
-        try:
-            await wait_msg.delete()
-        except TelegramBadRequest:
-            pass
-    await safe_answer(message, text, reply_markup=kb)
+        edited = await safe_edit_text(wait_msg, text, reply_markup=kb)
+        if not edited:
+            await safe_answer(message, text, reply_markup=kb)
+    else:
+        await safe_answer(message, text, reply_markup=kb)
 
 
 @router.message(F.text.in_({"На завтра", "📆 На завтра", "Расписание на завтра", "📅 На завтра", "Завтра", "завтра"}))
@@ -302,11 +316,11 @@ async def cmd_tomorrow(message: Message):
     kb = get_schedule_nav_inline_keyboard(user["group_id"], tomorrow_str, web_url)
     
     if wait_msg:
-        try:
-            await wait_msg.delete()
-        except TelegramBadRequest:
-            pass
-    await safe_answer(message, text, reply_markup=kb)
+        edited = await safe_edit_text(wait_msg, text, reply_markup=kb)
+        if not edited:
+            await safe_answer(message, text, reply_markup=kb)
+    else:
+        await safe_answer(message, text, reply_markup=kb)
 
 
 @router.message(F.text.in_({"Выбрать дату", "🗓 Выбрать дату", "📅 Выбрать дату", "Даты", "даты", "Выбор даты"}))
@@ -345,7 +359,7 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
 
     elif action == "admin":
         if not await is_admin(query.from_user.id):
-            await safe_query_answer(query, "⛔️ Доступ запрещен.", show_alert=True)
+            await safe_query_answer(query, "Доступ запрещен.", show_alert=True)
             return
         panel_text = await render_admin_panel_text()
         is_maint = await is_maintenance_mode()
@@ -405,42 +419,15 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
 
     elif action == "mygroup":
         notifications_on = True if (not user or user.get("notifications") is None or user.get("notifications") == 1) else False
-        notif_status_text = "Включены" if notifications_on else "Отключены"
-        notif_icon = te(PE_BELL) if notifications_on else te(PE_CROSS)
-        if user and user.get("group_name"):
-            text = (
-                f"{te(PE_PEOPLE)} <b>Твой профиль:</b>\n\n"
-                f"{te(PE_CHECK)} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n"
-                f"{notif_icon} Уведомления о расписании: <b>{notif_status_text}</b>\n\n"
-                "Чтобы сменить группу, нажми <b>«Сменить группу»</b> или просто напиши её номер в чат."
-            )
-        else:
-            text = (
-                f"{te(PE_INFO)} <b>Группа пока не выбрана!</b>\n\n"
-                f"{notif_icon} Уведомления: <b>{notif_status_text}</b>\n\n"
-                "Напиши в чат номер или первые буквы своей группы (например: <code>253</code> или <code>ИС</code>):"
-            )
+        text = render_profile_text(user)
         await safe_edit_text(query.message, text, reply_markup=get_my_group_keyboard(notifications_on))
 
     elif action == "toggle_notify":
         new_state = await toggle_user_notifications(query.from_user.id)
         user = await get_user(query.from_user.id)
-        notif_status_text = "Включены" if new_state else "Отключены"
-        notif_icon = te(PE_BELL) if new_state else te(PE_CROSS)
-        await safe_query_answer(query, f"Уведомления {notif_status_text.lower()}!")
-        if user and user.get("group_name"):
-            text = (
-                f"{te(PE_PEOPLE)} <b>Твой профиль:</b>\n\n"
-                f"{te(PE_CHECK)} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n"
-                f"{notif_icon} Уведомления о расписании: <b>{notif_status_text}</b>\n\n"
-                "Чтобы сменить группу, нажми <b>«Сменить группу»</b> или просто напиши её номер в чат."
-            )
-        else:
-            text = (
-                f"{te(PE_INFO)} <b>Группа пока не выбрана!</b>\n\n"
-                f"{notif_icon} Уведомления: <b>{notif_status_text}</b>\n\n"
-                "Напиши в чат номер или первые буквы своей группы (например: <code>253</code> или <code>ИС</code>):"
-            )
+        notif_status_text = "включены" if new_state else "отключены"
+        await safe_query_answer(query, f"Уведомления {notif_status_text}!")
+        text = render_profile_text(user)
         await safe_edit_text(query.message, text, reply_markup=get_my_group_keyboard(new_state))
 
     elif action in ("change_group", "groups"):
@@ -712,11 +699,11 @@ async def process_any_text(message: Message, state: FSMContext):
         web_url = sched.get("url")
         kb = get_schedule_nav_inline_keyboard(user["group_id"], target_date_str, web_url)
         if wait_msg:
-            try:
-                await wait_msg.delete()
-            except TelegramBadRequest:
-                pass
-        await safe_answer(message, text_msg, reply_markup=kb)
+            edited = await safe_edit_text(wait_msg, text_msg, reply_markup=kb)
+            if not edited:
+                await safe_answer(message, text_msg, reply_markup=kb)
+        else:
+            await safe_answer(message, text_msg, reply_markup=kb)
         return
 
     if len(text) <= 25:
@@ -741,7 +728,7 @@ async def process_any_text(message: Message, state: FSMContext):
     await safe_answer(
         message,
         f"{te(PE_CROSS, '!')} По запросу «<b>{html.escape(text)}</b>» ничего не найдено.\n\n"
-        f"💡 <b>Подсказка:</b> чтобы найти группу, отправь в чат её номер или первые буквы (например: <code>ИС</code>, <code>253</code> или <code>АВ-261</code>).",
+        f"{te(PE_STAR)} <b>Подсказка:</b> чтобы найти группу, отправь в чат её номер или первые буквы (например: <code>ИС</code>, <code>253</code> или <code>АВ-261</code>).",
         reply_markup=get_main_menu_inline()
     )
 
@@ -777,11 +764,11 @@ async def handle_group_search_query(message: Message, query: str, preloaded_grou
         kb = get_schedule_nav_inline_keyboard(str(g["id"]), today_str, web_url)
         
         if wait_msg:
-            try:
-                await wait_msg.delete()
-            except TelegramBadRequest:
-                pass
-        await safe_answer(message, text, reply_markup=kb)
+            edited = await safe_edit_text(wait_msg, text, reply_markup=kb)
+            if not edited:
+                await safe_answer(message, text, reply_markup=kb)
+        else:
+            await safe_answer(message, text, reply_markup=kb)
         return
 
     kb = get_groups_search_inline_keyboard(groups)
@@ -846,9 +833,9 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
         new_maint = not curr
         await set_maintenance_mode(new_maint)
         alert_text = (
-            "⚠️ Технический перерыв ВКЛЮЧЕН!\nБот закрыт для всех обычных пользователей."
+            "Технический перерыв ВКЛЮЧЕН!\nБот закрыт для всех обычных пользователей."
             if new_maint else
-            "✅ Технический перерыв ВЫКЛЮЧЕН!\nБот снова открыт для всех пользователей."
+            "Технический перерыв ВЫКЛЮЧЕН!\nБот снова открыт для всех пользователей."
         )
         await safe_query_answer(query, alert_text, show_alert=True)
         panel_text = await render_admin_panel_text()
@@ -872,7 +859,7 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
         try:
             await get_groups(force_refresh=True)
             await get_available_dates(force_refresh=True)
-            await safe_query_answer(query, "✅ Кэш групп и дат успешно сброшен!", show_alert=True)
+            await safe_query_answer(query, "Кэш групп и дат успешно сброшен!", show_alert=True)
         except Exception as e:
             await safe_query_answer(query, f"Ошибка обновления кэша: {e}", show_alert=True)
 
@@ -908,6 +895,12 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
             try:
                 await query.bot.send_message(uid, bc_text, parse_mode="HTML")
                 sent += 1
+            except TelegramBadRequest:
+                try:
+                    await query.bot.send_message(uid, strip_tg_emoji(bc_text), parse_mode="HTML")
+                    sent += 1
+                except Exception:
+                    failed += 1
             except Exception as e:
                 err = str(e).lower()
                 if "forbidden" in err or "blocked" in err:

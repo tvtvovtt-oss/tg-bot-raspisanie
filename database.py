@@ -97,6 +97,24 @@ async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
             return None
 
 
+async def ensure_user(
+    user_id: int,
+    username: Optional[str] = None,
+    first_name: Optional[str] = None
+):
+    """Регистрирует пользователя при первом обращении, если его ещё нет в базе."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        now = datetime.now().isoformat()
+        await db.execute("""
+            INSERT INTO users (user_id, username, first_name, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = COALESCE(excluded.username, users.username),
+                first_name = COALESCE(excluded.first_name, users.first_name)
+        """, (user_id, username, first_name, now))
+        await db.commit()
+
+
 async def set_user_group(
     user_id: int,
     group_id: str,
@@ -239,15 +257,13 @@ async def is_admin(user_id: int) -> bool:
     global _ADMIN_IDS_CACHE
     if user_id in ADMIN_IDS:
         return True
-    if _ADMIN_IDS_CACHE is not None and user_id in _ADMIN_IDS_CACHE:
-        return True
+    if _ADMIN_IDS_CACHE is not None:
+        return user_id in _ADMIN_IDS_CACHE
     try:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             async with db.execute("SELECT 1 FROM bot_admins WHERE user_id = ?", (user_id,)) as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    if _ADMIN_IDS_CACHE is not None:
-                        _ADMIN_IDS_CACHE.add(user_id)
                     return True
     except Exception:
         pass

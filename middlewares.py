@@ -3,6 +3,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Message, CallbackQuery
 
 from database import is_maintenance_mode, is_admin
+from premium_emoji import te, PE_SETTINGS
 
 
 class MaintenanceMiddleware(BaseMiddleware):
@@ -35,7 +36,7 @@ class MaintenanceMiddleware(BaseMiddleware):
         # Обычные пользователи блокируются с уведомлением
         if isinstance(event, Message):
             await event.answer(
-                "🛠 <b>Бот временно закрыт на технический перерыв</b>\n\n"
+                f"{te(PE_SETTINGS, '⚙️')} <b>Бот временно закрыт на технический перерыв</b>\n\n"
                 "Ведутся технические работы или обновление данных.\n"
                 "Пожалуйста, попробуйте немного позже!",
                 parse_mode="HTML"
@@ -43,7 +44,7 @@ class MaintenanceMiddleware(BaseMiddleware):
             return None
         elif isinstance(event, CallbackQuery):
             await event.answer(
-                "🛠 Бот закрыт на тех. перерыв. Попробуйте позже!",
+                "Бот временно закрыт на тех. перерыв. Попробуйте позже!",
                 show_alert=True
             )
             return None
