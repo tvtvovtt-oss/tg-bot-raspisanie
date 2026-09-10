@@ -5,7 +5,7 @@ from typing import Optional
 
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -35,6 +35,7 @@ from parser import (
 from keyboards import (
     get_main_keyboard,
     get_main_menu_inline,
+    get_home_button_row,
     get_dates_inline_keyboard,
     get_groups_search_inline_keyboard,
     get_course_selection_keyboard,
