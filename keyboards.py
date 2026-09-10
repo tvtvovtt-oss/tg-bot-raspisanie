@@ -10,7 +10,9 @@ from aiogram.filters.callback_data import CallbackData
 from premium_emoji import (
     PE_CALENDAR, PE_TIME_PASSED, PE_BELL, PE_PEOPLE, PE_SEARCH,
     PE_HOUSE, PE_ARROW_LEFT, PE_REPEAT, PE_LINK,
-    PE_PERSON_CHECK, PE_CLOCK, PE_INFO, PE_CHECK
+    PE_PERSON_CHECK, PE_CLOCK, PE_INFO, PE_CHECK,
+    PE_SETTINGS, PE_LOCK_CLOSED, PE_LOCK_OPEN, PE_CHART_STATS,
+    PE_MEGAPHONE, PE_CROSS
 )
 
 
@@ -111,7 +113,8 @@ def get_main_menu_inline(is_admin_user: bool = False) -> InlineKeyboardMarkup:
     if is_admin_user:
         rows.append([
             InlineKeyboardButton(
-                text="👑 Панель администратора",
+                text="Панель администратора",
+                icon_custom_emoji_id=PE_SETTINGS,
                 callback_data=MenuCallback(action="admin").pack()
             )
         ])
@@ -444,33 +447,39 @@ def get_my_group_keyboard(notifications_enabled: bool = True) -> InlineKeyboardM
 
 def get_admin_keyboard(is_maintenance: bool) -> InlineKeyboardMarkup:
     """Клавиатура главной панели администратора."""
-    maint_text = "🟢 Открыть бота (выкл. тех. перерыв)" if is_maintenance else "🔴 Закрыть бота на тех. перерыв"
+    maint_text = "Открыть бота (выкл. тех. перерыв)" if is_maintenance else "Закрыть бота на тех. перерыв"
+    maint_icon = PE_LOCK_OPEN if is_maintenance else PE_LOCK_CLOSED
     kb = [
         [
             InlineKeyboardButton(
                 text=maint_text,
+                icon_custom_emoji_id=maint_icon,
                 callback_data=AdminCallback(action="toggle_maint").pack()
             )
         ],
         [
             InlineKeyboardButton(
-                text="📊 Статистика",
+                text="Статистика",
+                icon_custom_emoji_id=PE_CHART_STATS,
                 callback_data=AdminCallback(action="stats").pack()
             ),
             InlineKeyboardButton(
-                text="🔄 Сбросить кэш сайта",
+                text="Сбросить кэш сайта",
+                icon_custom_emoji_id=PE_REPEAT,
                 callback_data=AdminCallback(action="refresh_cache").pack()
             )
         ],
         [
             InlineKeyboardButton(
-                text="📢 Рассылка пользователям",
+                text="Рассылка пользователям",
+                icon_custom_emoji_id=PE_MEGAPHONE,
                 callback_data=AdminCallback(action="broadcast").pack()
             )
         ],
         [
             InlineKeyboardButton(
-                text="❌ Закрыть панель",
+                text="Закрыть панель",
+                icon_custom_emoji_id=PE_CROSS,
                 callback_data=AdminCallback(action="close").pack()
             )
         ]
@@ -483,7 +492,8 @@ def get_admin_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="« Назад в админ-панель",
+                text="Назад в админ-панель",
+                icon_custom_emoji_id=PE_ARROW_LEFT,
                 callback_data=AdminCallback(action="panel").pack()
             )
         ]
@@ -495,11 +505,13 @@ def get_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="✅ Отправить всем",
+                text="Отправить всем",
+                icon_custom_emoji_id=PE_CHECK,
                 callback_data=AdminCallback(action="confirm_bc").pack()
             ),
             InlineKeyboardButton(
-                text="❌ Отмена",
+                text="Отмена",
+                icon_custom_emoji_id=PE_CROSS,
                 callback_data=AdminCallback(action="cancel_bc").pack()
             )
         ]

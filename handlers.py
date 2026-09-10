@@ -60,7 +60,8 @@ logger = logging.getLogger(__name__)
 from premium_emoji import (
     te, strip_tg_emoji, PE_BOT, PE_CALENDAR, PE_BELL, PE_SEARCH, PE_PEOPLE, PE_INFO, PE_CHECK,
     PE_CLOCK, PE_HOUSE, PE_PERSON_CHECK, PE_TIME_PASSED, PE_STAR, PE_WARNING,
-    PE_WRITE, PE_LINK, PE_REPEAT, PE_ARROW_LEFT, PE_CROSS
+    PE_WRITE, PE_LINK, PE_REPEAT, PE_ARROW_LEFT, PE_CROSS,
+    PE_SETTINGS, PE_LOCK_CLOSED, PE_LOCK_OPEN, PE_CHART_STATS, PE_MEGAPHONE, PE_BAN
 )
 
 router = Router()
@@ -772,14 +773,18 @@ async def render_admin_panel_text() -> str:
     """Формирует текст главной панели администратора."""
     is_maint = await is_maintenance_mode()
     stats = await get_bot_stats()
-    maint_status = "🔴 <b>ВКЛЮЧЕН</b> (доступ только админам)" if is_maint else "🟢 <b>ВЫКЛЮЧЕН</b> (бот открыт для всех)"
+    maint_status = (
+        f"{te(PE_LOCK_CLOSED)} <b>ВКЛЮЧЕН</b> (доступ только админам)"
+        if is_maint else
+        f"{te(PE_CHECK)} <b>ВЫКЛЮЧЕН</b> (бот открыт для всех)"
+    )
     return (
-        f"👑 <b>Панель администратора</b>\n\n"
-        f"🛠 <b>Технический перерыв:</b> {maint_status}\n\n"
-        f"👥 <b>Пользователей в базе:</b> <code>{stats['total']}</code>\n"
-        f"🔔 <b>С уведомлениями:</b> <code>{stats['with_notif']}</code>\n"
-        f"🎓 <b>Выбрали группу:</b> <code>{stats['with_group']}</code>\n"
-        f"👨‍🏫 <b>Выбрали преподавателя:</b> <code>{stats['with_teacher']}</code>"
+        f"{te(PE_SETTINGS)} <b>Панель администратора</b>\n\n"
+        f"{te(PE_WARNING)} <b>Технический перерыв:</b> {maint_status}\n\n"
+        f"{te(PE_PEOPLE)} <b>Пользователей в базе:</b> <code>{stats['total']}</code>\n"
+        f"{te(PE_BELL)} <b>С уведомлениями:</b> <code>{stats['with_notif']}</code>\n"
+        f"{te(PE_SEARCH)} <b>Выбрали группу:</b> <code>{stats['with_group']}</code>\n"
+        f"{te(PE_PERSON_CHECK)} <b>Выбрали преподавателя:</b> <code>{stats['with_teacher']}</code>"
     )
 
 
@@ -799,7 +804,7 @@ async def cmd_admin(message: Message, state: FSMContext):
 async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, state: FSMContext):
     """Обработчик действий внутри панели администратора."""
     if not await is_admin(query.from_user.id):
-        await safe_query_answer(query, "⛔️ Доступ запрещен.", show_alert=True)
+        await safe_query_answer(query, "Доступ запрещен.", show_alert=True)
         return
 
     action = callback_data.action
@@ -828,12 +833,12 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
         stats = await get_bot_stats()
         top_groups_str = "\n".join([f"  • <b>{html.escape(g)}</b>: {cnt} чел." for g, cnt in stats["top_groups"]]) or "  <i>Нет данных</i>"
         text = (
-            f"📊 <b>Детальная статистика бота:</b>\n\n"
-            f"👥 Всего пользователей: <b>{stats['total']}</b>\n"
-            f"🔔 С включенными уведомлениями: <b>{stats['with_notif']}</b>\n"
-            f"🎓 С выбранной группой: <b>{stats['with_group']}</b>\n"
-            f"👨‍🏫 С выбранным преподавателем: <b>{stats['with_teacher']}</b>\n\n"
-            f"🏆 <b>Топ-5 групп:</b>\n{top_groups_str}"
+            f"{te(PE_CHART_STATS)} <b>Детальная статистика бота:</b>\n\n"
+            f"{te(PE_PEOPLE)} Всего пользователей: <b>{stats['total']}</b>\n"
+            f"{te(PE_BELL)} С включенными уведомлениями: <b>{stats['with_notif']}</b>\n"
+            f"{te(PE_SEARCH)} С выбранной группой: <b>{stats['with_group']}</b>\n"
+            f"{te(PE_PERSON_CHECK)} С выбранным преподавателем: <b>{stats['with_teacher']}</b>\n\n"
+            f"{te(PE_STAR)} <b>Топ-5 групп:</b>\n{top_groups_str}"
         )
         await safe_edit_text(query.message, text, reply_markup=get_admin_back_keyboard())
         await safe_query_answer(query)
@@ -856,7 +861,7 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
     elif action == "broadcast":
         await state.set_state(BotStates.waiting_for_broadcast)
         text = (
-            "📢 <b>Рассылка сообщений пользователям</b>\n\n"
+            f"{te(PE_MEGAPHONE)} <b>Рассылка сообщений пользователям</b>\n\n"
             "Отправьте текст сообщения для рассылки всем пользователям бота.\n\n"
             "<i>Для отмены напишите <code>отмена</code> или нажмите кнопку ниже:</i>"
         )
@@ -872,7 +877,7 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
             return
 
         user_ids = await get_all_user_ids()
-        await safe_edit_text(query.message, f"⏳ Начинаю рассылку для {len(user_ids)} пользователей...")
+        await safe_edit_text(query.message, f"{te(PE_CLOCK)} Начинаю рассылку для {len(user_ids)} пользователей...")
         sent, blocked, failed = 0, 0, 0
         for uid in user_ids:
             try:
@@ -887,11 +892,11 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
             await asyncio.sleep(0.05)  # Telegram API rate-limit protection
 
         res_text = (
-            f"📢 <b>Рассылка успешно завершена!</b>\n\n"
-            f"✅ Доставлено: <b>{sent}</b>\n"
-            f"🚫 Заблокировали бота: <b>{blocked}</b>\n"
-            f"⚠️ Ошибок отправки: <b>{failed}</b>\n"
-            f"👥 Всего пользователей: <b>{len(user_ids)}</b>"
+            f"{te(PE_MEGAPHONE)} <b>Рассылка успешно завершена!</b>\n\n"
+            f"{te(PE_CHECK)} Доставлено: <b>{sent}</b>\n"
+            f"{te(PE_BAN)} Заблокировали бота: <b>{blocked}</b>\n"
+            f"{te(PE_WARNING)} Ошибок отправки: <b>{failed}</b>\n"
+            f"{te(PE_PEOPLE)} Всего пользователей: <b>{len(user_ids)}</b>"
         )
         await safe_edit_text(query.message, res_text, reply_markup=get_admin_back_keyboard())
 
@@ -915,7 +920,7 @@ async def handle_broadcast_input(message: Message, state: FSMContext):
         await state.clear()
         panel_text = await render_admin_panel_text()
         is_maint = await is_maintenance_mode()
-        await safe_answer(message, "❌ Рассылка отменена.")
+        await safe_answer(message, f"{te(PE_CROSS)} Рассылка отменена.")
         await safe_answer(message, panel_text, reply_markup=get_admin_keyboard(is_maint))
         return
 
@@ -924,7 +929,7 @@ async def handle_broadcast_input(message: Message, state: FSMContext):
     await state.update_data(broadcast_text=formatted_text)
 
     preview_text = (
-        f"📢 <b>Предпросмотр сообщения для рассылки:</b>\n"
+        f"{te(PE_MEGAPHONE)} <b>Предпросмотр сообщения для рассылки:</b>\n"
         f"────────────────────\n"
         f"{formatted_text}\n"
         f"────────────────────\n\n"

@@ -542,12 +542,73 @@ async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool =
 
     cards = soup.find_all("div", class_="myCard")
     lessons = []
+    practices = []
     
     for card in cards:
         card_header = card.find("div", class_="card-header")
         if not card_header:
             continue
         
+        header_text_raw = card_header.get_text(strip=True).lower()
+        if "практик" in header_text_raw:
+            card_body = card.find("div", class_="card-body")
+            if card_body:
+                rows = card_body.find_all("div", class_=re.compile(r"d-flex"))
+                if not rows:
+                    rows = [card_body]
+                for r in rows:
+                    b_tag = r.find("b")
+                    code = b_tag.get_text(strip=True) if b_tag else ""
+                    
+                    small_tag = r.find("small")
+                    full_name = small_tag.get_text(strip=True) if small_tag else ""
+                    if not full_name:
+                        span_title = r.find("span", title=True)
+                        if span_title and span_title.get("title"):
+                            full_name = span_title["title"].strip()
+
+                    if code and full_name and code != full_name:
+                        title = f"{full_name} ({code})"
+                    elif full_name:
+                        title = full_name
+                    elif code:
+                        title = code
+                    else:
+                        title = "Практика"
+
+                    aud = ""
+                    aud_link = r.find("a", href=re.compile(r"rooms\?idAudience"))
+                    if aud_link:
+                        aud = aud_link.get_text(strip=True)
+                    else:
+                        m_aud = re.search(r"ауд\.?\s*([^\s,]+)", r.get_text())
+                        if m_aud:
+                            aud = m_aud.group(1).strip()
+
+                    leaders = []
+                    for staff in r.find_all("span", class_="Staff"):
+                        fio = staff.get_text(strip=True).replace("\xa0", " ").strip()
+                        if fio:
+                            leaders.append(fio)
+                    leader_str = " / ".join(leaders) if leaders else ""
+
+                    note = ""
+                    for span in r.find_all("span", class_="font-italic"):
+                        txt = span.get_text(strip=True)
+                        if "п/гр" in txt.lower() or "пары" in txt.lower():
+                            note = txt
+                            break
+
+                    practices.append({
+                        "title": title,
+                        "code": code,
+                        "name": full_name,
+                        "audience": aud,
+                        "leader": leader_str,
+                        "note": note
+                    })
+            continue
+
         pair_span = card_header.find("span", class_="h3")
         pair_num = pair_span.get_text(strip=True) if pair_span else ""
         time_span = card_header.find("span", class_="h4")
@@ -626,7 +687,8 @@ async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool =
         })
 
     has_lessons = any(bool(l.get("items")) for l in lessons) if lessons else False
-    is_published = (not is_not_published) and has_lessons
+    has_schedule = has_lessons or bool(practices)
+    is_published = (not is_not_published) and has_schedule
 
     return {
         "success": True,
@@ -634,6 +696,7 @@ async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool =
         "header": header_text,
         "alerts": alerts,
         "lessons": lessons,
+        "practices": practices,
         "is_published": is_published,
         "is_not_published": is_not_published
     }
@@ -677,10 +740,46 @@ async def get_teacher_schedule(staff_id: str, date_str: str, force_refresh: bool
 
     cards = soup.find_all("div", class_="myCard")
     lessons = []
+    practices = []
     for card in cards:
         card_header = card.find("div", class_="card-header")
         card_body = card.find("div", class_="card-body")
         if not card_header or not card_body:
+            continue
+
+        header_text_raw = card_header.get_text(strip=True).lower()
+        if "практик" in header_text_raw:
+            rows = card_body.find_all("div", class_=re.compile(r"d-flex"))
+            if not rows:
+                rows = [card_body]
+            for r in rows:
+                g_span = r.find("span", class_="h5")
+                group_val = g_span.get_text(strip=True) if g_span else ""
+
+                b_tag = r.find("b")
+                code = b_tag.get_text(strip=True) if b_tag else ""
+                small_tag = r.find("small")
+                full_name = small_tag.get_text(strip=True) if small_tag else ""
+                if not full_name:
+                    span_title = r.find("span", title=True)
+                    if span_title and span_title.get("title"):
+                        full_name = span_title["title"].strip()
+
+                if code and full_name and code != full_name:
+                    title = f"{full_name} ({code})"
+                elif full_name:
+                    title = full_name
+                elif code:
+                    title = code
+                else:
+                    title = "Практика"
+
+                practices.append({
+                    "group": group_val,
+                    "title": title,
+                    "code": code,
+                    "name": full_name
+                })
             continue
         
         pair_span = card_header.find("span", class_="h3")
@@ -709,7 +808,8 @@ async def get_teacher_schedule(staff_id: str, date_str: str, force_refresh: bool
         })
 
     has_lessons = len(lessons) > 0
-    is_published = (not is_not_published) and has_lessons
+    has_schedule = has_lessons or bool(practices)
+    is_published = (not is_not_published) and has_schedule
 
     return {
         "success": True,
@@ -717,6 +817,7 @@ async def get_teacher_schedule(staff_id: str, date_str: str, force_refresh: bool
         "header": header_text,
         "alerts": alerts,
         "lessons": lessons,
+        "practices": practices,
         "is_published": is_published,
         "is_not_published": is_not_published
     }
@@ -784,7 +885,8 @@ def is_schedule_published(sched: Optional[Dict[str, Any]]) -> bool:
         if "не опубликовано" in a.lower():
             return False
     lessons = sched.get("lessons", [])
-    if not lessons:
+    practices = sched.get("practices", [])
+    if not lessons and not practices:
         return False
     return bool(sched.get("is_published", True))
 
@@ -862,13 +964,32 @@ def format_schedule_message(
     ]
 
     lessons = data.get("lessons", [])
-    if not lessons:
+    practices = data.get("practices", [])
+
+    if not lessons and not practices:
         alerts = data.get("alerts", [])
         if alerts:
             lines.append(f"{te(PE_INFO)} <i>{html.escape(alerts[0])}</i>")
         else:
             lines.append(f"{te(PE_PARTY)} <b>Пар нет!</b> В этот день занятия отсутствуют.")
         return "\n".join(lines)
+
+    if practices:
+        lines.append(f"{te(PE_STAR)} <b>Практика:</b>")
+        for p in practices:
+            p_title = html.escape(p.get("title") or "Практика")
+            aud = p.get("audience", "").strip()
+            aud_part = f" <i>(ауд. {html.escape(aud)})</i>" if aud else ""
+            lines.append(f"  <b>{p_title}</b>{aud_part}")
+
+            leader = p.get("leader", "").strip()
+            if leader:
+                lines.append(f"   {te(PE_PERSON_CHECK)} <i>Рук.: {html.escape(leader)}</i>")
+
+            note = p.get("note", "").strip()
+            if note:
+                lines.append(f"   {te(PE_INFO)} <i>{html.escape(note)}</i>")
+        lines.append("")
 
     # Pre-parse pair times to calculate breaks between pairs
     parsed_lessons = []
@@ -986,9 +1107,20 @@ def format_teacher_schedule_message(
     ]
 
     lessons = data.get("lessons", [])
-    if not lessons:
+    practices = data.get("practices", [])
+
+    if not lessons and not practices:
         lines.append(f"{te(PE_PARTY)} <b>Пар нет!</b> В этот день у преподавателя нет занятий.")
         return "\n".join(lines)
+
+    if practices:
+        lines.append(f"{te(PE_STAR)} <b>Практика (руководство):</b>")
+        for p in practices:
+            grp = p.get("group", "").strip()
+            grp_part = f" <b>{html.escape(grp)}</b> — " if grp else " "
+            p_title = html.escape(p.get("title") or "Практика")
+            lines.append(f" {grp_part}{p_title}")
+        lines.append("")
 
     parsed_lessons = []
     for l in lessons:
