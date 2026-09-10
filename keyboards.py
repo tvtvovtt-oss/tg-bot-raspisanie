@@ -26,9 +26,10 @@ class DateCallback(CallbackData, prefix="dt"):
 
 
 class GroupCallback(CallbackData, prefix="grp"):
-    action: str  # "select", "course"
+    action: str  # "select", "course", "zaochn_menu", "zaochn_all"
     group_id: str = ""
     course: int = 0
+    form: str = "fulltime"
 
 
 class TeacherCallback(CallbackData, prefix="tch"):
@@ -204,15 +205,40 @@ def get_dates_inline_keyboard(
 # ---------- Inline: группы и курсы ----------
 
 def get_course_selection_keyboard() -> InlineKeyboardMarkup:
-    """Выбор курса чисто кнопками: 1–4 курс (без дефолтных эмодзи) + назад в меню."""
+    """Выбор курса очного отделения (1–4 курс) + кнопка Заочное отделение + назад в меню."""
     buttons = [
         [
-            InlineKeyboardButton(text="1 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=1).pack()),
-            InlineKeyboardButton(text="2 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=2).pack())
+            InlineKeyboardButton(text="1 курс (очн.)", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=1, form="fulltime").pack()),
+            InlineKeyboardButton(text="2 курс (очн.)", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=2, form="fulltime").pack())
         ],
         [
-            InlineKeyboardButton(text="3 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=3).pack()),
-            InlineKeyboardButton(text="4 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=4).pack())
+            InlineKeyboardButton(text="3 курс (очн.)", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=3, form="fulltime").pack()),
+            InlineKeyboardButton(text="4 курс (очн.)", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=4, form="fulltime").pack())
+        ],
+        [
+            InlineKeyboardButton(text="Заочное отделение", icon_custom_emoji_id=PE_PEOPLE, callback_data=GroupCallback(action="zaochn_menu").pack())
+        ],
+        get_home_button_row()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_zaochn_selection_keyboard() -> InlineKeyboardMarkup:
+    """Выбор курса заочного отделения или всех заочных групп."""
+    buttons = [
+        [
+            InlineKeyboardButton(text="1 курс (заоч.)", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=1, form="correspondence").pack()),
+            InlineKeyboardButton(text="2 курс (заоч.)", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=2, form="correspondence").pack())
+        ],
+        [
+            InlineKeyboardButton(text="3 курс (заоч.)", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=3, form="correspondence").pack()),
+            InlineKeyboardButton(text="4 курс (заоч.)", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=4, form="correspondence").pack())
+        ],
+        [
+            InlineKeyboardButton(text="Все группы заочного (38)", icon_custom_emoji_id=PE_PEOPLE, callback_data=GroupCallback(action="zaochn_all").pack())
+        ],
+        [
+            InlineKeyboardButton(text="К очному отделению", icon_custom_emoji_id=PE_ARROW_LEFT, callback_data=MenuCallback(action="change_group").pack())
         ],
         get_home_button_row()
     ]
@@ -221,7 +247,8 @@ def get_course_selection_keyboard() -> InlineKeyboardMarkup:
 
 def get_groups_search_inline_keyboard(
     groups: List[Dict[str, Any]],
-    with_back_course: bool = False
+    with_back_course: bool = False,
+    back_action: str = "change_group"
 ) -> InlineKeyboardMarkup:
     """Список найденных групп в виде сетки кнопок (по 2 в ряд) + Главное меню."""
     buttons: List[List[InlineKeyboardButton]] = []
@@ -241,11 +268,17 @@ def get_groups_search_inline_keyboard(
         buttons.append(row)
 
     if with_back_course:
+        if back_action == "zaochn_menu":
+            back_btn_cb = GroupCallback(action="zaochn_menu").pack()
+            back_btn_text = "К заочному отделению"
+        else:
+            back_btn_cb = MenuCallback(action="change_group").pack()
+            back_btn_text = "К выбору курса"
         buttons.append([
             InlineKeyboardButton(
-                text="К выбору курса",
+                text=back_btn_text,
                 icon_custom_emoji_id=PE_ARROW_LEFT,
-                callback_data=MenuCallback(action="change_group").pack()
+                callback_data=back_btn_cb
             )
         ])
     buttons.append(get_home_button_row())

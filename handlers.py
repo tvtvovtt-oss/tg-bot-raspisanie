@@ -18,6 +18,7 @@ from parser import (
     get_available_dates,
     get_groups,
     get_groups_by_course,
+    get_zaochn_groups,
     search_groups,
     get_staffs,
     search_teachers,
@@ -39,6 +40,7 @@ from keyboards import (
     get_dates_inline_keyboard,
     get_groups_search_inline_keyboard,
     get_course_selection_keyboard,
+    get_zaochn_selection_keyboard,
     get_teachers_letters_keyboard,
     get_teachers_search_inline_keyboard,
     get_schedule_nav_inline_keyboard,
@@ -513,16 +515,39 @@ async def cb_teacher_handler(query: CallbackQuery, callback_data: TeacherCallbac
 async def cb_group_handler(query: CallbackQuery, callback_data: GroupCallback):
     await safe_query_answer(query)
     
-    if callback_data.action == "course":
-        course_num = callback_data.course
-        groups = await get_groups_by_course(course_num)
-        if not groups:
-            await safe_query_answer(query, f"Группы {course_num} курса не найдены.", show_alert=True)
-            return
-        kb = get_groups_search_inline_keyboard(groups, with_back_course=True)
+    if callback_data.action == "zaochn_menu":
         await safe_edit_text(
             query.message,
-            f"{te(PE_INFO)} <b>Группы {course_num} курса ({len(groups)}):</b>\nВыбери свою группу кнопками:",
+            f"{te(PE_PEOPLE)} <b>Заочное отделение:</b>\n\n"
+            "Выбери курс заочного отделения или открой полный список групп:",
+            reply_markup=get_zaochn_selection_keyboard()
+        )
+        return
+
+    if callback_data.action == "zaochn_all":
+        groups = await get_zaochn_groups()
+        kb = get_groups_search_inline_keyboard(groups, with_back_course=True, back_action="zaochn_menu")
+        await safe_edit_text(
+            query.message,
+            f"{te(PE_INFO)} <b>Все группы заочного отделения ({len(groups)}):</b>\nВыбери свою группу кнопками:",
+            reply_markup=kb
+        )
+        return
+
+    if callback_data.action == "course":
+        course_num = callback_data.course
+        form = callback_data.form or "fulltime"
+        groups = await get_groups_by_course(course_num, form=form)
+        if not groups:
+            form_text = "очного" if form == "fulltime" else "заочного"
+            await safe_query_answer(query, f"Группы {course_num} курса ({form_text}) не найдены.", show_alert=True)
+            return
+        back_act = "change_group" if form == "fulltime" else "zaochn_menu"
+        kb = get_groups_search_inline_keyboard(groups, with_back_course=True, back_action=back_act)
+        title_form = "очное отделение" if form == "fulltime" else "заочное отделение"
+        await safe_edit_text(
+            query.message,
+            f"{te(PE_INFO)} <b>Группы {course_num} курса ({title_form}, {len(groups)}):</b>\nВыбери свою группу кнопками:",
             reply_markup=kb
         )
         return
