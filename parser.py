@@ -110,7 +110,8 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
                         "label": fut_str,
                         "is_today": (i == 0),
                         "is_future": (i > 0),
-                        "is_past": False
+                        "is_past": False,
+                        "on_site": False
                     }
 
                 # 2. Добавляем опубликованные даты с сайта (включая архив текущей недели)
@@ -129,6 +130,7 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
                     if dt in dates_dict:
                         dates_dict[dt]["day_name"] = day_name
                         dates_dict[dt]["label"] = day_label
+                        dates_dict[dt]["on_site"] = True
                     else:
                         dates_dict[dt] = {
                             "date": dt,
@@ -136,7 +138,8 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
                             "label": day_label,
                             "is_today": (diff == 0),
                             "is_future": (diff > 0),
-                            "is_past": (diff < 0)
+                            "is_past": (diff < 0),
+                            "on_site": True
                         }
 
                 # Сортировка: сегодня и будущие по возрастанию, затем архивные дни по убыванию
@@ -170,7 +173,8 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
             "label": d_val,
             "is_today": (i == 0),
             "is_future": (i > 0),
-            "is_past": False
+            "is_past": False,
+            "on_site": (i <= 1)
         })
     for i in range(1, 4):
         d = today_dt - timedelta(days=i)
@@ -183,7 +187,8 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
             "label": d_val,
             "is_today": False,
             "is_future": False,
-            "is_past": True
+            "is_past": True,
+            "on_site": True
         })
     return {
         "today": today_str,
@@ -527,10 +532,13 @@ async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool =
     header_text = header_div.get_text(strip=True, separator=" ") if header_div else ""
 
     alerts = []
+    is_not_published = False
     for a in soup.find_all("div", class_=re.compile(r"alert")):
         t = a.get_text(strip=True)
         if "cookie" not in t.lower():
             alerts.append(t)
+            if "не опубликовано" in t.lower():
+                is_not_published = True
 
     cards = soup.find_all("div", class_="myCard")
     lessons = []
@@ -617,12 +625,17 @@ async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool =
             "items": subgroup_rows
         })
 
+    has_lessons = any(bool(l.get("items")) for l in lessons) if lessons else False
+    is_published = (not is_not_published) and has_lessons
+
     return {
         "success": True,
         "url": url,
         "header": header_text,
         "alerts": alerts,
-        "lessons": lessons
+        "lessons": lessons,
+        "is_published": is_published,
+        "is_not_published": is_not_published
     }
 
 
@@ -654,10 +667,13 @@ async def get_teacher_schedule(staff_id: str, date_str: str, force_refresh: bool
     header_text = header_div.get_text(strip=True, separator=" ") if header_div else ""
 
     alerts = []
+    is_not_published = False
     for a in soup.find_all("div", class_=re.compile(r"alert")):
         t = a.get_text(strip=True)
         if "cookie" not in t.lower():
             alerts.append(t)
+            if "не опубликовано" in t.lower():
+                is_not_published = True
 
     cards = soup.find_all("div", class_="myCard")
     lessons = []
@@ -692,12 +708,17 @@ async def get_teacher_schedule(staff_id: str, date_str: str, force_refresh: bool
             "details": body_text
         })
 
+    has_lessons = len(lessons) > 0
+    is_published = (not is_not_published) and has_lessons
+
     return {
         "success": True,
         "url": url,
         "header": header_text,
         "alerts": alerts,
-        "lessons": lessons
+        "lessons": lessons,
+        "is_published": is_published,
+        "is_not_published": is_not_published
     }
 
 
@@ -724,6 +745,48 @@ def format_russian_date(date_str: str) -> str:
         return f"{WEEKDAYS_RU[dt.weekday()]}, {dt.day} {MONTHS_RU[dt.month]} {dt.year}"
     except Exception:
         return date_str
+
+
+WEEKDAYS_RU_ACCUSATIVE = {
+    0: "понедельник",
+    1: "вторник",
+    2: "среду",
+    3: "четверг",
+    4: "пятницу",
+    5: "субботу",
+    6: "воскресенье"
+}
+
+
+def format_schedule_notification_date(date_str: str) -> str:
+    """Formats date in accusative case for notification header: e.g. 'субботу, 12 сентября 2026'."""
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        wd = WEEKDAYS_RU_ACCUSATIVE.get(dt.weekday(), WEEKDAYS_RU[dt.weekday()])
+        return f"{wd}, {dt.day} {MONTHS_RU[dt.month]} {dt.year}"
+    except Exception:
+        return date_str
+
+
+def is_schedule_published(sched: Optional[Dict[str, Any]]) -> bool:
+    """
+    Returns True ONLY if the schedule has actually been published by the college with lessons.
+    Returns False if:
+      - Request failed (!success)
+      - The site explicitly says 'не опубликовано'
+      - There are no lessons
+    """
+    if not sched or not sched.get("success", True):
+        return False
+    if sched.get("is_not_published"):
+        return False
+    for a in sched.get("alerts", []):
+        if "не опубликовано" in a.lower():
+            return False
+    lessons = sched.get("lessons", [])
+    if not lessons:
+        return False
+    return bool(sched.get("is_published", True))
 
 
 def to_roman_pair(pair_str: str) -> str:

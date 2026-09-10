@@ -17,7 +17,9 @@ from parser import (
     get_teacher_schedule,
     format_schedule_message,
     format_teacher_schedule_message,
-    format_russian_date
+    format_russian_date,
+    format_schedule_notification_date,
+    is_schedule_published
 )
 from keyboards import (
     get_schedule_nav_inline_keyboard,
@@ -37,16 +39,17 @@ _IS_FIRST_RUN = True
 async def check_and_notify_users(bot: Bot):
     """
     Checks for newly published schedules and notifies subscribed users.
-    Only checks dates >= today.
+    Only checks official on-site published dates >= today.
     """
     global _IS_FIRST_RUN
 
     try:
         dates_info = await get_available_dates(force_refresh=True)
         today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
+        # Only check dates that are officially published on the college site (not synthetic UI placeholders)
         available_dates = [
             d["date"] for d in dates_info.get("dates", [])
-            if d.get("date", "") >= today_str
+            if d.get("date", "") >= today_str and d.get("on_site", False)
         ]
 
         if not available_dates:
@@ -98,12 +101,11 @@ async def check_and_notify_users(bot: Bot):
 
                 # Fetch schedule once for this group and date
                 sched = await get_group_schedule(g_id, date_str, force_refresh=True)
-                has_content = sched.get("has_schedule") or bool(sched.get("lessons")) or bool(sched.get("alerts"))
-                if not has_content:
-                    # If empty or not yet published, skip marking so we can notify when it does publish
+                if not is_schedule_published(sched):
+                    # If empty, 'не опубликовано' or failed, skip so we can notify when it truly publishes
                     continue
 
-                human_date = format_russian_date(date_str)
+                human_date = format_schedule_notification_date(date_str)
                 header = (
                     f"{te(PE_BELL)} <b>Опубликовано новое расписание на {human_date}!</b>\n\n"
                 )
@@ -156,11 +158,10 @@ async def check_and_notify_users(bot: Bot):
                     continue
 
                 sched = await get_teacher_schedule(t_id, date_str, force_refresh=True)
-                has_content = sched.get("has_schedule") or bool(sched.get("lessons")) or bool(sched.get("alerts"))
-                if not has_content:
+                if not is_schedule_published(sched):
                     continue
 
-                human_date = format_russian_date(date_str)
+                human_date = format_schedule_notification_date(date_str)
                 header = (
                     f"{te(PE_BELL)} <b>Опубликовано новое расписание на {human_date}!</b>\n\n"
                 )

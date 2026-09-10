@@ -1,7 +1,10 @@
 import aiosqlite
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from config import DATABASE_PATH
+
+logger = logging.getLogger(__name__)
 
 
 async def init_db():
@@ -35,6 +38,14 @@ async def init_db():
                 PRIMARY KEY (user_id, target_type, target_id, schedule_date)
             )
         """)
+
+        # Clean up any mistakenly recorded future dates so users will receive the real notifications once published
+        try:
+            tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            await db.execute("DELETE FROM notified_schedules WHERE schedule_date > ?", (tomorrow_str,))
+        except Exception:
+            pass
+
         await db.commit()
 
 
@@ -118,21 +129,36 @@ async def get_users_for_notifications() -> list:
 
 
 async def is_user_notified(user_id: int, target_type: str, target_id: str, schedule_date: str) -> bool:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        query = """
-            SELECT 1 FROM notified_schedules
-            WHERE user_id = ? AND target_type = ? AND target_id = ? AND schedule_date = ?
-        """
-        async with db.execute(query, (user_id, target_type, str(target_id), schedule_date)) as cursor:
-            row = await cursor.fetchone()
-            return row is not None
+    try:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            query = """
+                SELECT 1 FROM notified_schedules
+                WHERE user_id = ? AND target_type = ? AND target_id = ? AND schedule_date = ?
+            """
+            async with db.execute(query, (user_id, target_type, str(target_id), schedule_date)) as cursor:
+                row = await cursor.fetchone()
+                return row is not None
+    except Exception as e:
+        logger.warning(f"Ошибка при проверке уведомления пользователя {user_id}: {e}")
+        try:
+            await init_db()
+        except Exception:
+            pass
+        return False
 
 
 async def mark_user_notified(user_id: int, target_type: str, target_id: str, schedule_date: str):
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        query = """
-            INSERT OR IGNORE INTO notified_schedules (user_id, target_type, target_id, schedule_date)
-            VALUES (?, ?, ?, ?)
-        """
-        await db.execute(query, (user_id, target_type, str(target_id), schedule_date))
-        await db.commit()
+    try:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            query = """
+                INSERT OR IGNORE INTO notified_schedules (user_id, target_type, target_id, schedule_date)
+                VALUES (?, ?, ?, ?)
+            """
+            await db.execute(query, (user_id, target_type, str(target_id), schedule_date))
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Ошибка при сохранении уведомления пользователя {user_id}: {e}")
+        try:
+            await init_db()
+        except Exception:
+            pass
