@@ -298,14 +298,46 @@ async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
                     if isinstance(val, dict) and "Name" in val:
                         g_id = str(val.get("id") or val.get("idGroup") or key)
                         name = val.get("Name", "").strip()
-                        kurs = val.get("Kurs") or val.get("realCourse") or 1
+                        # Определяем реальный курс группы (1-4):
+                        # 1. Приоритет реальному курсу realCourse из API техникума
+                        # 2. Определение по году поступления в названии группы (-26 -> 1, -25 -> 2, -24 -> 3, -23 -> 4)
+                        # 3. Fallback на внутренний код Kurs
+                        course_val = None
+                        rk = val.get("realCourse")
+                        if rk is not None:
+                            try:
+                                rk_int = int(rk)
+                                if 1 <= rk_int <= 4:
+                                    course_val = rk_int
+                                elif rk_int > 4:
+                                    course_val = 4
+                            except (ValueError, TypeError):
+                                pass
+
+                        if course_val is None:
+                            m_yr = re.search(r"[-](\d{2})", name)
+                            if m_yr:
+                                try:
+                                    yr = int(m_yr.group(1))
+                                    calc_c = 2026 - (2000 + yr) + 1
+                                    if 1 <= calc_c <= 4:
+                                        course_val = calc_c
+                                except Exception:
+                                    pass
+
+                        if course_val is None:
+                            k = val.get("Kurs")
+                            if k is not None:
+                                try:
+                                    k_int = int(k)
+                                    if 1 <= k_int <= 4:
+                                        course_val = k_int
+                                except (ValueError, TypeError):
+                                    pass
+
+                        kurs_int = course_val if course_val is not None else 1
                         is_sched = val.get("isSchedule", 1)
                         out_name = val.get("outName", name)
-                        
-                        try:
-                            kurs_int = int(kurs)
-                        except (ValueError, TypeError):
-                            kurs_int = 1
 
                         groups_dict[g_id] = {
                             "id": g_id,
@@ -656,13 +688,13 @@ async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool =
                                 break
                 
                 hw = ""
-                hw_tag = sdiv.find(string=re.compile(r"Д\.з:"))
+                hw_tag = sdiv.find(string=re.compile(r"Д\.з:")) or (card_body.find(string=re.compile(r"Д\.з:")) if card_body else None)
                 if hw_tag:
                     hw = hw_tag.strip()
                     hw = re.sub(r"^Д\.з:\s*", "", hw).strip()
 
                 topic = ""
-                topic_tag = sdiv.find(string=re.compile(r"Тема:"))
+                topic_tag = sdiv.find(string=re.compile(r"Тема:")) or (card_body.find(string=re.compile(r"Тема:")) if card_body else None)
                 if topic_tag:
                     topic = topic_tag.strip()
                     topic = re.sub(r"^Тема:\s*", "", topic).strip()
