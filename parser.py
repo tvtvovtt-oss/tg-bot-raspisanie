@@ -95,18 +95,54 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
                 selected = data.get("selected_date", today)
                 raw_dates = data.get("dates", [])
                 
-                formatted_dates = []
+                today_dt = datetime.strptime(today, "%Y-%m-%d") if today else datetime.now()
+                dates_dict = {}
+
+                # 1. Добавляем сегодняшние и будущие учебные дни (сегодня + до следующей недели, пропуская воскресенья)
+                for i in range(0, 7):
+                    fut = today_dt + timedelta(days=i)
+                    if fut.weekday() == 6:  # Воскресенье пропускаем
+                        continue
+                    fut_str = fut.strftime("%Y-%m-%d")
+                    dates_dict[fut_str] = {
+                        "date": fut_str,
+                        "day_name": "",
+                        "label": fut_str,
+                        "is_today": (i == 0),
+                        "is_future": (i > 0),
+                        "is_past": False
+                    }
+
+                # 2. Добавляем опубликованные даты с сайта (включая архив текущей недели)
                 for d in raw_dates:
                     dt = d.get("Date", "")
+                    if not dt:
+                        continue
                     day_name = d.get("name", "") or d.get("Value", "")
                     day_label = d.get("day", dt)
-                    is_today = (dt == today)
-                    formatted_dates.append({
-                        "date": dt,
-                        "day_name": day_name,
-                        "label": day_label,
-                        "is_today": is_today
-                    })
+                    try:
+                        d_obj = datetime.strptime(dt, "%Y-%m-%d")
+                        diff = (d_obj.date() - today_dt.date()).days
+                    except Exception:
+                        diff = 0
+
+                    if dt in dates_dict:
+                        dates_dict[dt]["day_name"] = day_name
+                        dates_dict[dt]["label"] = day_label
+                    else:
+                        dates_dict[dt] = {
+                            "date": dt,
+                            "day_name": day_name,
+                            "label": day_label,
+                            "is_today": (diff == 0),
+                            "is_future": (diff > 0),
+                            "is_past": (diff < 0)
+                        }
+
+                # Сортировка: сегодня и будущие по возрастанию, затем архивные дни по убыванию
+                upcoming = sorted([d for d in dates_dict.values() if not d.get("is_past")], key=lambda x: x["date"])
+                past = sorted([d for d in dates_dict.values() if d.get("is_past")], key=lambda x: x["date"], reverse=True)
+                formatted_dates = upcoming + past
 
                 result = {
                     "today": today,
@@ -121,20 +157,99 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
 
     # Fallback if request fails
     today_str = datetime.now().strftime("%Y-%m-%d")
+    today_dt = datetime.now()
     fallback_dates = []
-    for i in range(-1, 5):
-        d_val = (datetime.now() + timedelta(days=i)).strftime("%Y-%m-%d")
+    for i in range(0, 7):
+        d = today_dt + timedelta(days=i)
+        if d.weekday() == 6:
+            continue
+        d_val = d.strftime("%Y-%m-%d")
         fallback_dates.append({
             "date": d_val,
-            "day_name": f"+{i} дн." if i != 0 else "Сегодня",
+            "day_name": "",
             "label": d_val,
-            "is_today": i == 0
+            "is_today": (i == 0),
+            "is_future": (i > 0),
+            "is_past": False
+        })
+    for i in range(1, 4):
+        d = today_dt - timedelta(days=i)
+        if d.weekday() == 6:
+            continue
+        d_val = d.strftime("%Y-%m-%d")
+        fallback_dates.append({
+            "date": d_val,
+            "day_name": "",
+            "label": d_val,
+            "is_today": False,
+            "is_future": False,
+            "is_past": True
         })
     return {
         "today": today_str,
         "selected": today_str,
         "dates": fallback_dates
     }
+
+
+WEEKDAYS_RU_NAMES = [
+    "понедельник", "вторник", "среда", "четверг",
+    "пятница", "суббота", "воскресенье"
+]
+
+
+def resolve_weekday_to_date(target_weekday: int, ref_date: Optional[datetime] = None) -> Tuple[str, str]:
+    """
+    Вычисляет целевую дату для запрошенного дня недели (0=Пн..6=Вс).
+    Если день уже прошел на этой неделе (например, сегодня четверг, а просят понедельник),
+    возвращает СЛЕДУЮЩИЙ понедельник (будущую дату).
+    Возвращает (date_str 'YYYY-MM-DD', human_label).
+    """
+    if ref_date is None:
+        ref_date = datetime.now()
+
+    curr_weekday = ref_date.weekday()
+    if target_weekday == curr_weekday:
+        target_dt = ref_date
+        label = "Сегодня"
+    elif target_weekday > curr_weekday:
+        days = target_weekday - curr_weekday
+        target_dt = ref_date + timedelta(days=days)
+        label = "Завтра" if days == 1 else f"{WEEKDAYS_RU_NAMES[target_weekday].capitalize()}"
+    else:
+        # День недели меньше текущего (например: сегодня четверг 3, просят понедельник 0)
+        # Это СЛЕДУЮЩАЯ неделя (+7 - delta)
+        days = (target_weekday - curr_weekday) + 7
+        target_dt = ref_date + timedelta(days=days)
+        label = f"Следующий {WEEKDAYS_RU_NAMES[target_weekday]}"
+
+    return target_dt.strftime("%Y-%m-%d"), label
+
+
+def parse_weekday_from_text(text: str) -> Optional[int]:
+    """
+    Распознает день недели из сообщения пользователя.
+    Возвращает 0 (Пн) .. 6 (Вс) или None.
+    """
+    clean = re.sub(r"[^\w\s]", " ", text.lower()).strip()
+    words = clean.split()
+
+    patterns = {
+        0: ["понедельник", "понедельника", "понедельнику", "пн"],
+        1: ["вторник", "вторника", "вторнику", "вт"],
+        2: ["среда", "среду", "среды", "ср"],
+        3: ["четверг", "четверга", "четвергу", "чт"],
+        4: ["пятница", "пятницу", "пятницы", "пт"],
+        5: ["суббота", "субботу", "субботы", "сб"],
+        6: ["воскресенье", "воскресенья", "воскресенью", "вс"]
+    }
+
+    for wd, keywords in patterns.items():
+        for kw in keywords:
+            if kw in words or clean == kw:
+                return wd
+
+    return None
 
 
 def get_tomorrow_date(dates_info: Dict[str, Any]) -> str:

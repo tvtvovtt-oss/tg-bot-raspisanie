@@ -24,7 +24,9 @@ from parser import (
     format_schedule_message,
     format_teacher_schedule_message,
     get_calls_text,
-    get_tomorrow_date
+    get_tomorrow_date,
+    resolve_weekday_to_date,
+    parse_weekday_from_text
 )
 from keyboards import (
     get_main_keyboard,
@@ -301,12 +303,13 @@ async def cmd_choose_date(message: Message):
     
     dates_info = await get_available_dates()
     dates_list = dates_info.get("dates", [])
+    today_str = dates_info.get("today")
     
     if not dates_list:
         await safe_answer(message, f"{te(PE_WARNING, '!')} Не удалось получить список дат с сайта.")
         return
 
-    kb = get_dates_inline_keyboard(dates_list, target_type="group", target_id=group_id)
+    kb = get_dates_inline_keyboard(dates_list, target_type="group", target_id=group_id, today_str=today_str)
     await safe_answer(message, f"{te(PE_CLOCK)} <b>Выбери дату для просмотра расписания:</b>", reply_markup=kb)
 
 
@@ -366,10 +369,11 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
         group_id = user["group_id"] if user and user.get("group_id") else ""
         dates_info = await get_available_dates()
         dates_list = dates_info.get("dates", [])
+        today_str = dates_info.get("today")
         if not dates_list:
             await safe_query_answer(query, "Не удалось загрузить даты.", show_alert=True)
             return
-        kb = get_dates_inline_keyboard(dates_list, target_type="group", target_id=group_id)
+        kb = get_dates_inline_keyboard(dates_list, target_type="group", target_id=group_id, today_str=today_str)
         await safe_edit_text(query.message, f"{te(PE_CLOCK)} <b>Выбери дату кнопками:</b>", reply_markup=kb)
 
     elif action == "calls":
@@ -551,7 +555,8 @@ async def cb_date_handler(query: CallbackQuery, callback_data: DateCallback):
     if action == "nav":
         dates_info = await get_available_dates()
         dates_list = dates_info.get("dates", [])
-        kb = get_dates_inline_keyboard(dates_list, target_type=target_type, target_id=target_id)
+        today_str = dates_info.get("today")
+        kb = get_dates_inline_keyboard(dates_list, target_type=target_type, target_id=target_id, today_str=today_str)
         try:
             await query.message.edit_reply_markup(reply_markup=kb)
         except TelegramBadRequest:
@@ -630,6 +635,43 @@ async def process_teacher_search_state(message: Message, state: FSMContext):
 async def process_any_text(message: Message, state: FSMContext):
     """Если пользователь просто прислал сообщение в чат."""
     text = message.text.strip()
+
+    # 0. Проверяем, не запрашивает ли пользователь день недели (например: "понедельник", "на понедельник", "расписание на понедельник")
+    wd = parse_weekday_from_text(text)
+    if wd is not None:
+        user = await get_user(message.from_user.id)
+        if not user or not user.get("group_id"):
+            await safe_answer(
+                message,
+                f"{te(PE_WARNING, '!')} <b>Сначала укажи свою группу!</b>\n"
+                "Напиши в чат её номер или первые буквы (например: <code>253</code> или <code>ИС</code>):"
+            )
+            return
+
+        dates_info = await get_available_dates()
+        today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
+        try:
+            today_dt = datetime.strptime(today_str, "%Y-%m-%d")
+        except Exception:
+            today_dt = datetime.now()
+
+        target_date_str, day_label = resolve_weekday_to_date(wd, today_dt)
+        wait_msg = await safe_answer(
+            message,
+            f"{te(PE_CALENDAR)} <i>Загружаю расписание на {day_label.lower()} ({target_date_str})...</i>"
+        )
+        sched = await get_group_schedule(user["group_id"], target_date_str)
+        text_msg = format_schedule_message(sched, user["group_name"], target_date_str, day_label)
+        web_url = sched.get("url")
+        kb = get_schedule_nav_inline_keyboard(user["group_id"], target_date_str, web_url)
+        if wait_msg:
+            try:
+                await wait_msg.delete()
+            except TelegramBadRequest:
+                pass
+        await safe_answer(message, text_msg, reply_markup=kb)
+        return
+
     if len(text) <= 25:
         # 1. Поиск групп по первым буквам или цифрам (например: ис, 253, ав-261, 26)
         groups = await search_groups(text)

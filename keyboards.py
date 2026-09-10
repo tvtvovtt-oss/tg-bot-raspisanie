@@ -109,18 +109,63 @@ def get_main_menu_inline() -> InlineKeyboardMarkup:
 
 # ---------- Inline: выбор даты ----------
 
+WEEKDAYS_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def format_date_button_label(dt_str: str, today_str: Optional[str] = None) -> str:
+    """
+    Генерирует понятный текст кнопки с днем недели и датой.
+    Например:
+    - 'Сегодня (10.09)'
+    - 'Завтра (11.09)'
+    - 'Сб, 12.09'
+    - 'Пн, 14.09' (след. понедельник)
+    - '07.09 (Пн)' (архивный день)
+    """
+    try:
+        from datetime import datetime
+        dt = datetime.strptime(dt_str, "%Y-%m-%d")
+        t_dt = datetime.strptime(today_str, "%Y-%m-%d") if today_str else datetime.now()
+        diff = (dt.date() - t_dt.date()).days
+        wd = WEEKDAYS_SHORT[dt.weekday()]
+        day_str = f"{dt.day:02d}.{dt.month:02d}"
+
+        if diff == 0:
+            return f"Сегодня ({day_str})"
+        elif diff == 1:
+            return f"Завтра ({day_str})"
+        elif diff == -1:
+            return f"Вчера ({day_str})"
+        elif diff > 1:
+            return f"{wd}, {day_str}"
+        else:
+            return f"{day_str} ({wd})"
+    except Exception:
+        return dt_str
+
+
 def get_dates_inline_keyboard(
     dates: List[Dict[str, Any]],
     target_type: str = "group",
-    target_id: str = ""
+    target_id: str = "",
+    today_str: Optional[str] = None
 ) -> InlineKeyboardMarkup:
     """Inline-кнопки с доступными датами + кнопка возврата в меню."""
+    if not today_str:
+        for d in dates:
+            if d.get("is_today"):
+                today_str = d.get("date")
+                break
+    if not today_str:
+        from datetime import datetime
+        today_str = datetime.now().strftime("%Y-%m-%d")
+
     buttons: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
     for d in dates:
         dt = d["date"]
-        label = d.get("day_name", "") or d.get("label", dt)
-        
+        label = format_date_button_label(dt, today_str)
+
         btn = InlineKeyboardButton(
             text=label,
             icon_custom_emoji_id=PE_CALENDAR,
