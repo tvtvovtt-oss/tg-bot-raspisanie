@@ -991,6 +991,9 @@ def format_schedule_message(
                 lines.append(f"   {te(PE_INFO)} <i>{html.escape(note)}</i>")
         lines.append("")
 
+    if not lessons and practices:
+        lines.append(f"{te(PE_INFO)} <i>Обычных пар нет (у группы практика)</i>")
+
     # Pre-parse pair times to calculate breaks between pairs
     parsed_lessons = []
     for l in lessons:
@@ -1121,6 +1124,9 @@ def format_teacher_schedule_message(
             p_title = html.escape(p.get("title") or "Практика")
             lines.append(f" {grp_part}{p_title}")
         lines.append("")
+
+    if not lessons and practices:
+        lines.append(f"{te(PE_INFO)} <i>Обычных пар нет (только руководство практикой)</i>")
 
     parsed_lessons = []
     for l in lessons:
