@@ -31,9 +31,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="today", description="Расписание на сегодня"),
         BotCommand(command="tomorrow", description="Расписание на завтра"),
         BotCommand(command="dates", description="Выбрать дату"),
-        BotCommand(command="calls", description="Расписание звонков"),
         BotCommand(command="mygroup", description="Моя группа"),
-        BotCommand(command="teachers", description="Преподаватели"),
         BotCommand(command="help", description="Справка и помощь"),
     ]
     await bot.set_my_commands(commands)

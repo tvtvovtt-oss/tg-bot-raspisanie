@@ -122,12 +122,10 @@ async def cmd_help(message: Message):
     text = (
         f"{te(PE_INFO)} <b>Как пользоваться ботом:</b>\n\n"
         f"• {te(PE_CALENDAR)} <b>На сегодня / На завтра</b> — расписание твоей группы\n"
-        f"• {te(PE_CLOCK)} <b>Выбрать дату</b> — расписание на любой доступный день\n"
-        f"• {te(PE_BELL)} <b>Звонки</b> — расписание пар и перемен техникума\n"
-        f"• {te(PE_PEOPLE)} <b>Моя группа</b> — текущая группа и управление уведомлениями\n"
-        f"• {te(PE_PERSON_CHECK)} <b>Преподаватели</b> — алфавитный каталог преподавателей\n\n"
-        f"{te(PE_SEARCH)} <b>Поиск группы:</b> просто напиши в чат её первые буквы или цифры (например: <code>ИС</code>, <code>253</code> или <code>АВ-261</code>)!\n\n"
-        f"{te(PE_STAR)} <i>Подсказка: ты можешь нажать /start один раз и дальше переключаться только кнопками!</i>"
+        f"• {te(PE_CLOCK)} <b>Выбрать дату</b> — расписание на любой день\n"
+        f"• {te(PE_PEOPLE)} <b>Моя группа</b> — текущая группа, смена группы и уведомления\n\n"
+        f"{te(PE_SEARCH)} <b>Быстрый поиск группы:</b> просто отправь в чат её номер или первые буквы (например: <code>ИС</code>, <code>253</code> или <code>АВ-261</code>)!\n\n"
+        f"{te(PE_STAR)} <i>Подсказка: ты можешь нажать /start один раз и дальше переключаться кнопками меню!</i>"
     )
     await message.answer(text, reply_markup=get_main_keyboard())
 
@@ -370,9 +368,9 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
     elif action in ("change_group", "groups"):
         await safe_edit_text(
             query.message,
-            f"{te(PE_SEARCH)} <b>Поиск группы:</b>\n\n"
-            "Напиши в чат номер или первые буквы группы (например: <code>ИС-253</code>, <code>253</code> или <code>ИС</code>):",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[get_home_button_row()])
+            f"{te(PE_SEARCH)} <b>Смена группы:</b>\n\n"
+            "Выбери свой курс кнопками ниже или просто напиши номер/буквы группы в чат (например: <code>253</code> или <code>ИС</code>):",
+            reply_markup=get_course_selection_keyboard()
         )
 
     elif action == "teachers":
@@ -447,7 +445,7 @@ async def cb_group_handler(query: CallbackQuery, callback_data: GroupCallback):
         if not groups:
             await query.answer(f"Группы {course_num} курса не найдены.", show_alert=True)
             return
-        kb = get_groups_search_inline_keyboard(groups)
+        kb = get_groups_search_inline_keyboard(groups, with_back_course=True)
         await safe_edit_text(
             query.message,
             f"{te(PE_INFO)} <b>Группы {course_num} курса ({len(groups)}):</b>\nВыбери свою группу кнопками:",

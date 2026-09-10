@@ -628,6 +628,17 @@ def format_minutes_ru(m: int) -> str:
     return f"{m} минут"
 
 
+STANDARD_BREAKS = {
+    1: 10,
+    2: 30,
+    3: 10,
+    4: 10,
+    5: 10,
+    6: 5,
+    7: 5
+}
+
+
 def format_schedule_message(
     data: Dict[str, Any],
     group_name: str,
@@ -684,15 +695,21 @@ def format_schedule_message(
         else:
             time_part = ""
 
-        # Calculate break after this pair if next pair exists and break >= 15 min
+        # Calculate break after this pair if next pair exists (for each pair)
         break_str = ""
         if i + 1 < len(parsed_lessons):
             next_dt1 = parsed_lessons[i + 1]["dt1"]
             curr_dt2 = item["dt2"]
+            diff_min = 0
             if next_dt1 and curr_dt2:
                 diff_min = int((next_dt1 - curr_dt2).total_seconds() / 60)
-                if diff_min >= 15:
-                    break_str = f" <i>(Перемена {format_minutes_ru(diff_min)})</i>"
+            if diff_min <= 0:
+                p_digit = re.search(r"\d+", str(l.get("pair", "")))
+                p_val = int(p_digit.group(0)) if p_digit else (i + 1)
+                diff_min = STANDARD_BREAKS.get(p_val, 10)
+
+            if diff_min > 0:
+                break_str = f" <i>(Перемена {format_minutes_ru(diff_min)})</i>"
 
         # Pair header line
         lines.append(f"{te(PE_CLOCK)} <b>{p_num} пара{time_part}</b>{break_str}")
@@ -800,10 +817,16 @@ def format_teacher_schedule_message(
         if i + 1 < len(parsed_lessons):
             next_dt1 = parsed_lessons[i + 1]["dt1"]
             curr_dt2 = item["dt2"]
+            diff_min = 0
             if next_dt1 and curr_dt2:
                 diff_min = int((next_dt1 - curr_dt2).total_seconds() / 60)
-                if diff_min >= 15:
-                    break_str = f" <i>(Перемена {format_minutes_ru(diff_min)})</i>"
+            if diff_min <= 0:
+                p_digit = re.search(r"\d+", str(l.get("pair", "")))
+                p_val = int(p_digit.group(0)) if p_digit else (i + 1)
+                diff_min = STANDARD_BREAKS.get(p_val, 10)
+
+            if diff_min > 0:
+                break_str = f" <i>(Перемена {format_minutes_ru(diff_min)})</i>"
 
         lines.append(f"{te(PE_CLOCK)} <b>{p_num} пара{time_part}</b>{break_str}")
 
