@@ -38,6 +38,19 @@ XHR_HEADERS = {
 }
 
 
+EN_TO_RU_KEYBOARD = str.maketrans(
+    "qwertyuiop[]asdfghjkl;'zxcvbnm,./`",
+    "йцукенгшщзхъфывапролджэячсмитьбю.ё"
+)
+
+LATIN_LOOKALIKES = str.maketrans({
+    'a': 'а', 'b': 'в', 'c': 'с', 'e': 'е', 'k': 'к', 'm': 'м',
+    'h': 'н', 'o': 'о', 'p': 'р', 't': 'т', 'x': 'х', 'y': 'у',
+    'i': 'и', 's': 'с', 'd': 'д', 'g': 'г', 'l': 'л', 'n': 'п',
+    'u': 'и', 'v': 'в', 'w': 'ш', 'z': 'з'
+})
+
+
 def normalize_string(s: str) -> str:
     """Normalizes string for search: lowercase, remove dashes, spaces, dots."""
     return re.sub(r"[\s\-_.\(\)]+", "", s.lower())
@@ -170,27 +183,74 @@ async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
     return _GROUPS_CACHE
 
 
-async def search_groups(query: str, limit: int = 15) -> List[Dict[str, Any]]:
-    """Searches groups by name, course, or partial text."""
+async def search_groups(query: str, limit: int = 24) -> List[Dict[str, Any]]:
+    """
+    Searches groups by first letters, numbers, or partial name.
+    Supports English layout typos (e.g. 'bc' -> 'ис') and Latin lookalikes.
+    Ranks exact matches, letter prefixes, and number matches highest.
+    """
     all_groups = await get_groups()
     if not all_groups:
         return []
 
-    clean_q = normalize_string(query)
-    results = []
+    raw_clean = normalize_string(query)
+    if not raw_clean:
+        return []
+
+    # Generate search query variants (raw, converted from EN keyboard, converted from Latin lookalikes)
+    ru_keys_clean = normalize_string(query.translate(EN_TO_RU_KEYBOARD))
+    lookalikes_clean = normalize_string(query.translate(LATIN_LOOKALIKES))
     
+    terms = set()
+    for t in (raw_clean, ru_keys_clean, lookalikes_clean):
+        if t:
+            terms.add(t)
+
+    scored: List[Tuple[int, Dict[str, Any]]] = []
+
     for g in all_groups.values():
         norm_name = normalize_string(g["name"])
-        if norm_name == clean_q:
-            results.insert(0, g)
-        elif norm_name.startswith(clean_q):
-            results.append(g)
-        elif clean_q in norm_name:
-            results.append(g)
+        g_digits = re.findall(r'\d+', norm_name)
+        g_digits_str = g_digits[0] if g_digits else ""
+        g_letters = re.findall(r'[а-яёa-z]+', norm_name)
+        g_letters_str = g_letters[0] if g_letters else ""
+
+        max_score = 0
+        for t in terms:
+            score = 0
+            if norm_name == t:
+                score = 1000
+            elif norm_name.startswith(t):
+                score = 850
+            elif t.isdigit():
+                if g_digits_str == t:
+                    score = 800
+                elif g_digits_str.startswith(t):
+                    score = 700
+                elif t in norm_name:
+                    score = 500
+            elif t.isalpha():
+                if g_letters_str == t:
+                    score = 800
+                elif g_letters_str.startswith(t):
+                    score = 700
+                elif t in norm_name:
+                    score = 500
+            elif t in norm_name:
+                score = 600
+
+            if score > max_score:
+                max_score = score
+
+        if max_score > 0:
+            scored.append((max_score, g))
+
+    # Sort by score descending, then by name ascending
+    scored.sort(key=lambda x: (-x[0], x[1]["name"]))
 
     seen = set()
     unique_results = []
-    for g in results:
+    for _, g in scored:
         if g["id"] not in seen:
             seen.add(g["id"])
             unique_results.append(g)

@@ -53,16 +53,13 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
         ],
         [
             KeyboardButton(text="Моя группа", icon_custom_emoji_id=PE_PEOPLE),
-            KeyboardButton(text="Найти группу", icon_custom_emoji_id=PE_SEARCH)
-        ],
-        [
             KeyboardButton(text="Преподаватели", icon_custom_emoji_id=PE_PERSON_CHECK)
         ]
     ]
     return ReplyKeyboardMarkup(
         keyboard=kb,
         resize_keyboard=True,
-        input_field_placeholder="Выбирай действие кнопками"
+        input_field_placeholder="Напиши группу или выбери кнопками"
     )
 
 
@@ -116,13 +113,6 @@ def get_main_menu_inline() -> InlineKeyboardMarkup:
                 icon_custom_emoji_id=PE_PEOPLE,
                 callback_data=MenuCallback(action="mygroup").pack()
             ),
-            InlineKeyboardButton(
-                text="Найти группу",
-                icon_custom_emoji_id=PE_SEARCH,
-                callback_data=MenuCallback(action="groups").pack()
-            )
-        ],
-        [
             InlineKeyboardButton(
                 text="Преподаватели",
                 icon_custom_emoji_id=PE_PERSON_CHECK,
@@ -187,24 +177,22 @@ def get_course_selection_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_groups_search_inline_keyboard(groups: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
-    """Список найденных групп / групп курса с премиум-иконками."""
+    """Список найденных групп в виде сетки кнопок (по 2 в ряд) + Главное меню."""
     buttons: List[List[InlineKeyboardButton]] = []
-    for g in groups[:20]:
+    row: List[InlineKeyboardButton] = []
+    for g in groups[:24]:
         name = g.get("out_name") or g.get("name")
-        buttons.append([
-            InlineKeyboardButton(
-                text=name,
-                icon_custom_emoji_id=PE_PEOPLE,
-                callback_data=GroupCallback(action="select", group_id=str(g["id"])).pack()
-            )
-        ])
-    buttons.append([
-        InlineKeyboardButton(
-            text="К выбору курса",
-            icon_custom_emoji_id=PE_ARROW_LEFT,
-            callback_data=MenuCallback(action="groups").pack()
+        btn = InlineKeyboardButton(
+            text=name,
+            icon_custom_emoji_id=PE_PEOPLE,
+            callback_data=GroupCallback(action="select", group_id=str(g["id"])).pack()
         )
-    ])
+        row.append(btn)
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
     buttons.append(get_home_button_row())
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -393,7 +381,7 @@ def get_my_group_keyboard(notifications_enabled: bool = True) -> InlineKeyboardM
             InlineKeyboardButton(
                 text="Сменить группу",
                 icon_custom_emoji_id=PE_SEARCH,
-                callback_data=MenuCallback(action="groups").pack()
+                callback_data=MenuCallback(action="change_group").pack()
             )
         ],
         get_home_button_row()

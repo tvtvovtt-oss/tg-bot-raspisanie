@@ -33,7 +33,6 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="dates", description="Выбрать дату"),
         BotCommand(command="calls", description="Расписание звонков"),
         BotCommand(command="mygroup", description="Моя группа"),
-        BotCommand(command="search", description="Найти группу"),
         BotCommand(command="teachers", description="Преподаватели"),
         BotCommand(command="help", description="Справка и помощь"),
     ]
