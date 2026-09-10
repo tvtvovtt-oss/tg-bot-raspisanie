@@ -12,6 +12,7 @@ from config import BOT_TOKEN, PROXY_URL
 from database import init_db
 from handlers import router
 from parser import get_groups, get_available_dates
+from notifier import schedule_notification_worker
 
 # Configure logging
 logging.basicConfig(
@@ -73,10 +74,14 @@ async def main():
     # Delete webhook to prevent conflicts and drop pending updates
     await bot.delete_webhook(drop_pending_updates=True)
 
+    # Start background notifier worker
+    notifier_task = asyncio.create_task(schedule_notification_worker(bot))
+
     logger.info("Бот успешно запущен и готов к работе!")
     try:
         await dp.start_polling(bot)
     finally:
+        notifier_task.cancel()
         await bot.session.close()
         logger.info("Бот остановлен.")
 

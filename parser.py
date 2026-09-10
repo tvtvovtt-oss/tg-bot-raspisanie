@@ -102,6 +102,27 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
     }
 
 
+def get_tomorrow_date(dates_info: Dict[str, Any]) -> str:
+    """
+    Returns the next schedule date for 'tomorrow'.
+    Filters dates > today (sorted ascending, e.g. tomorrow).
+    If not yet published, computes the next study day (skipping Sunday).
+    """
+    today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
+    dates_list = dates_info.get("dates", [])
+    future_dates = sorted([d["date"] for d in dates_list if d.get("date", "") > today_str])
+    if future_dates:
+        return future_dates[0]
+    try:
+        curr = datetime.strptime(today_str, "%Y-%m-%d")
+        next_day = curr + timedelta(days=1)
+        if next_day.weekday() == 6:  # Sunday -> Monday
+            next_day += timedelta(days=1)
+        return next_day.strftime("%Y-%m-%d")
+    except Exception:
+        return (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
     """Fetches and parses list of all groups from /2020/json/groups"""
     global _GROUPS_CACHE, _GROUPS_CACHE_TIME
@@ -751,13 +772,13 @@ def format_teacher_schedule_message(
 def get_calls_text() -> str:
     """Returns звонки table styled exclusively with premium emojis."""
     return (
-        f"{te(PE_BELL, '•')} <b>Расписание звонков ГАПОУ «АПТ»:</b>\n\n"
-        f"{te(PE_CLOCK, '•')} <b>I пара:</b> <code>08:00 – 09:20</code> <i>(перемена 10 мин)</i>\n"
-        f"{te(PE_CLOCK, '•')} <b>II пара:</b> <code>09:30 – 10:50</code> <i>(большая перемена 30 мин)</i>\n"
-        f"{te(PE_CLOCK, '•')} <b>III пара:</b> <code>11:20 – 12:40</code> <i>(перемена 10 мин)</i>\n"
-        f"{te(PE_CLOCK, '•')} <b>IV пара:</b> <code>12:50 – 14:10</code> <i>(перемена 10 мин)</i>\n"
-        f"{te(PE_CLOCK, '•')} <b>V пара:</b> <code>14:20 – 15:40</code> <i>(перемена 10 мин)</i>\n"
-        f"{te(PE_CLOCK, '•')} <b>VI пара:</b> <code>15:50 – 17:10</code> <i>(перемена 5 мин)</i>\n"
-        f"{te(PE_CLOCK, '•')} <b>VII пара:</b> <code>17:15 – 18:35</code> <i>(перемена 5 мин)</i>\n"
-        f"{te(PE_CLOCK, '•')} <b>VIII пара:</b> <code>18:40 – 20:00</code>"
+        f"{te(PE_BELL)} <b>Расписание звонков ГАПОУ «АПТ»:</b>\n\n"
+        f"{te(PE_CLOCK)} <b>I пара:</b> <code>08:00 – 09:20</code> <i>(перемена 10 мин)</i>\n"
+        f"{te(PE_CLOCK)} <b>II пара:</b> <code>09:30 – 10:50</code> <i>(большая перемена 30 мин)</i>\n"
+        f"{te(PE_CLOCK)} <b>III пара:</b> <code>11:20 – 12:40</code> <i>(перемена 10 мин)</i>\n"
+        f"{te(PE_CLOCK)} <b>IV пара:</b> <code>12:50 – 14:10</code> <i>(перемена 10 мин)</i>\n"
+        f"{te(PE_CLOCK)} <b>V пара:</b> <code>14:20 – 15:40</code> <i>(перемена 10 мин)</i>\n"
+        f"{te(PE_CLOCK)} <b>VI пара:</b> <code>15:50 – 17:10</code> <i>(перемена 5 мин)</i>\n"
+        f"{te(PE_CLOCK)} <b>VII пара:</b> <code>17:15 – 18:35</code> <i>(перемена 5 мин)</i>\n"
+        f"{te(PE_CLOCK)} <b>VIII пара:</b> <code>18:40 – 20:00</code>"
     )

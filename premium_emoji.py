@@ -79,18 +79,83 @@ PE_FORUM_ONLINE     = PE_EYE         # 🟢 форум доступен
 PE_FORUM_OFFLINE    = PE_EYE_HIDDEN  # 🔴 форум недоступен
 
 
+EMOJI_FALLBACKS = {
+    PE_SETTINGS: "⚙️",
+    PE_PROFILE: "👤",
+    PE_PEOPLE: "👥",
+    PE_PERSON_CHECK: "👤",
+    PE_PERSON_CROSS: "👤",
+    PE_FILE: "📁",
+    PE_SMILE: "🙂",
+    PE_CHART_GROW: "📊",
+    PE_CHART_STATS: "📊",
+    PE_HOUSE: "🏠",
+    PE_LOCK_CLOSED: "🔒",
+    PE_LOCK_OPEN: "🔓",
+    PE_MEGAPHONE: "📣",
+    PE_CHECK: "✅",
+    PE_CROSS: "❌",
+    PE_PENCIL: "✏️",
+    PE_TRASH: "🗑️",
+    PE_ARROW_DOWN_LIST: "📰",
+    PE_PAPERCLIP: "📎",
+    PE_LINK: "🔗",
+    PE_INFO: "ℹ️",
+    PE_BOT: "🤖",
+    PE_EYE: "👁️",
+    PE_EYE_HIDDEN: "👁️",
+    PE_SEND_UP: "⬆️",
+    PE_DOWNLOAD: "⬇️",
+    PE_BELL: "🔔",
+    PE_GIFT: "🎁",
+    PE_CLOCK: "⏰",
+    PE_PARTY: "🎉",
+    PE_FONT: "🔤",
+    PE_WRITE: "✍️",
+    PE_MEDIA_PHOTO: "🖼️",
+    PE_GEOTAG: "📍",
+    PE_WALLET: "👛",
+    PE_BOX: "📦",
+    PE_CRYPTO_BOT: "👾",
+    PE_CALENDAR: "📅",
+    PE_TAG: "🏷️",
+    PE_TIME_PASSED: "📆",
+    PE_APPS: "📦",
+    PE_BRUSH: "🖌️",
+    PE_ADD_TEXT: "🔡",
+    PE_RESIZE: "↔️",
+    PE_COIN: "🪙",
+    PE_COIN_SEND: "🪙",
+    PE_COIN_RECV: "🏧",
+    PE_CODE: "💻",
+    PE_LOADING: "🔄",
+    PE_REPEAT: "🔄",
+    PE_ARROW_RIGHT: "➡️",
+    PE_ARROW_LEFT: "⬅️",
+    PE_BAN: "🚫",
+    PE_BUG: "🐞",
+    PE_TARGET: "🎯",
+    PE_COMMENT: "💬",
+    PE_SEARCH: "🔍",
+    PE_STAR: "⭐",
+    PE_WARNING: "⚠️",
+}
+
+
 def te(emoji_id: str, fallback: str = "🔹") -> str:
-    """Собирает HTML-тег премиум-эмодзи без дефолтных эмодзи.
-
-    Пример::
-
-        f"{te(PE_SETTINGS)} <b>Настройки</b>"
-
-    Премиум-пользователи видят анимированную иконку Telegram,
-    а вместо дефолтных эмодзи используется аккуратный маркер."""
-    if fallback == "!":
-        fallback = "❗"
-    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+    """Собирает HTML-тег премиум-эмодзи.
+    
+    Внутри <tg-emoji> всегда подставляется валидный Unicode-эмодзи,
+    чтобы избежать ошибки Telegram 'Bad Request: ENTITY_TEXT_INVALID'.
+    """
+    fb = fallback
+    if not fb or fb in ("•", "-", "*", "."):
+        fb = EMOJI_FALLBACKS.get(emoji_id, "🔹")
+    elif fb == "!":
+        fb = "❗"
+    elif fb == "?":
+        fb = "❓"
+    return f'<tg-emoji emoji-id="{emoji_id}">{fb}</tg-emoji>'
 
 
 # ---- Цветные кнопки -------------------------------------------------------

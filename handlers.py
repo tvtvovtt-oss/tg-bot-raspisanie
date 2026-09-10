@@ -9,7 +9,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from database import get_user, set_user_group, set_user_teacher
+from database import get_user, set_user_group, set_user_teacher, toggle_user_notifications
 from parser import (
     get_available_dates,
     get_groups,
@@ -23,7 +23,8 @@ from parser import (
     get_teacher_schedule,
     format_schedule_message,
     format_teacher_schedule_message,
-    get_calls_text
+    get_calls_text,
+    get_tomorrow_date
 )
 from keyboards import (
     get_main_keyboard,
@@ -144,18 +145,23 @@ async def cmd_calls(message: Message):
 async def cmd_my_group(message: Message, state: FSMContext):
     await state.clear()
     user = await get_user(message.from_user.id)
+    notifications_on = True if (not user or user.get("notifications") is None or user.get("notifications") == 1) else False
+    notif_status_text = "Включены" if notifications_on else "Отключены"
+    notif_icon = te(PE_BELL) if notifications_on else te(PE_CROSS)
     if user and user.get("group_name"):
         text = (
             f"{te(PE_PEOPLE)} <b>Твой профиль:</b>\n\n"
-            f"{te(PE_CHECK)} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n\n"
+            f"{te(PE_CHECK)} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n"
+            f"{notif_icon} Уведомления о расписании: <b>{notif_status_text}</b>\n\n"
             "Чтобы сменить группу, нажми <b>«Сменить группу»</b> или просто отправь её номер в чат."
         )
     else:
         text = (
             f"{te(PE_INFO)} <b>Группа пока не выбрана!</b>\n\n"
+            f"{notif_icon} Уведомления: <b>{notif_status_text}</b>\n\n"
             "Нажми <b>«Сменить группу»</b> ниже, чтобы выбрать курс кнопками."
         )
-    await message.answer(text, reply_markup=get_my_group_keyboard())
+    await message.answer(text, reply_markup=get_my_group_keyboard(notifications_on))
 
 
 @router.message(F.text.in_({"Найти группу", "🔍 Найти группу"}))
@@ -230,29 +236,7 @@ async def cmd_tomorrow(message: Message):
         return
 
     dates_info = await get_available_dates()
-    today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
-    
-    # Smart next schedule date
-    tomorrow_str = ""
-    dates_list = dates_info.get("dates", [])
-    found_today = False
-    for d in dates_list:
-        if d["date"] == today_str:
-            found_today = True
-            continue
-        if found_today:
-            tomorrow_str = d["date"]
-            break
-            
-    if not tomorrow_str:
-        try:
-            curr = datetime.strptime(today_str, "%Y-%m-%d")
-            next_day = curr + timedelta(days=1)
-            if next_day.weekday() == 6:  # Skip Sunday
-                next_day += timedelta(days=1)
-            tomorrow_str = next_day.strftime("%Y-%m-%d")
-        except Exception:
-            tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    tomorrow_str = get_tomorrow_date(dates_info)
 
     wait_msg = await message.answer(f"{te(PE_TIME_PASSED)} <i>Загружаю расписание на завтра...</i>")
     sched = await get_group_schedule(user["group_id"], tomorrow_str)
@@ -324,21 +308,7 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
             )
             return
         dates_info = await get_available_dates()
-        today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
-        tomorrow_str = ""
-        for d in dates_info.get("dates", []):
-            if d["date"] == today_str:
-                tomorrow_str = "found"
-                continue
-            if tomorrow_str == "found":
-                tomorrow_str = d["date"]
-                break
-        if not tomorrow_str or tomorrow_str == "found":
-            curr = datetime.strptime(today_str, "%Y-%m-%d")
-            next_day = curr + timedelta(days=1)
-            if next_day.weekday() == 6:
-                next_day += timedelta(days=1)
-            tomorrow_str = next_day.strftime("%Y-%m-%d")
+        tomorrow_str = get_tomorrow_date(dates_info)
 
         sched = await get_group_schedule(user["group_id"], tomorrow_str)
         text = format_schedule_message(sched, user["group_name"], tomorrow_str, "Завтра")
@@ -359,18 +329,44 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
         await safe_edit_text(query.message, get_calls_text(), reply_markup=get_calls_keyboard())
 
     elif action == "mygroup":
+        notifications_on = True if (not user or user.get("notifications") is None or user.get("notifications") == 1) else False
+        notif_status_text = "Включены" if notifications_on else "Отключены"
+        notif_icon = te(PE_BELL) if notifications_on else te(PE_CROSS)
         if user and user.get("group_name"):
             text = (
                 f"{te(PE_PEOPLE)} <b>Твой профиль:</b>\n\n"
-                f"{te(PE_CHECK)} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n\n"
+                f"{te(PE_CHECK)} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n"
+                f"{notif_icon} Уведомления о расписании: <b>{notif_status_text}</b>\n\n"
                 "Чтобы сменить группу, нажми <b>«Сменить группу»</b> ниже."
             )
         else:
             text = (
                 f"{te(PE_INFO)} <b>Группа пока не выбрана!</b>\n\n"
+                f"{notif_icon} Уведомления: <b>{notif_status_text}</b>\n\n"
                 "Выбери свой курс кнопками ниже:"
             )
-        await safe_edit_text(query.message, text, reply_markup=get_my_group_keyboard())
+        await safe_edit_text(query.message, text, reply_markup=get_my_group_keyboard(notifications_on))
+
+    elif action == "toggle_notify":
+        new_state = await toggle_user_notifications(query.from_user.id)
+        user = await get_user(query.from_user.id)
+        notif_status_text = "Включены" if new_state else "Отключены"
+        notif_icon = te(PE_BELL) if new_state else te(PE_CROSS)
+        await query.answer(f"Уведомления {notif_status_text.lower()}!")
+        if user and user.get("group_name"):
+            text = (
+                f"{te(PE_PEOPLE)} <b>Твой профиль:</b>\n\n"
+                f"{te(PE_CHECK)} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n"
+                f"{notif_icon} Уведомления о расписании: <b>{notif_status_text}</b>\n\n"
+                "Чтобы сменить группу, нажми <b>«Сменить группу»</b> ниже."
+            )
+        else:
+            text = (
+                f"{te(PE_INFO)} <b>Группа пока не выбрана!</b>\n\n"
+                f"{notif_icon} Уведомления: <b>{notif_status_text}</b>\n\n"
+                "Выбери свой курс кнопками ниже:"
+            )
+        await safe_edit_text(query.message, text, reply_markup=get_my_group_keyboard(new_state))
 
     elif action == "groups":
         await safe_edit_text(

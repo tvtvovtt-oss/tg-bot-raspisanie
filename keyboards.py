@@ -378,9 +378,17 @@ def get_calls_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[get_home_button_row()])
 
 
-def get_my_group_keyboard() -> InlineKeyboardMarkup:
-    """Кнопки под профилем группы."""
+def get_my_group_keyboard(notifications_enabled: bool = True) -> InlineKeyboardMarkup:
+    """Кнопки под профилем группы с возможностью включения/отключения уведомлений."""
+    notify_text = "Уведомления: Вкл" if notifications_enabled else "Уведомления: Выкл"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=notify_text,
+                icon_custom_emoji_id=PE_BELL,
+                callback_data=MenuCallback(action="toggle_notify").pack()
+            )
+        ],
         [
             InlineKeyboardButton(
                 text="Сменить группу",
