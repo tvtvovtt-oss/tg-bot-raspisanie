@@ -79,15 +79,15 @@ PE_FORUM_ONLINE     = PE_EYE         # 🟢 форум доступен
 PE_FORUM_OFFLINE    = PE_EYE_HIDDEN  # 🔴 форум недоступен
 
 
-def te(emoji_id: str, fallback: str) -> str:
-    """Собирает HTML-тег премиум-эмодзи с обычным эмодзи как fallback.
+def te(emoji_id: str, fallback: str = "•") -> str:
+    """Собирает HTML-тег премиум-эмодзи без дефолтных эмодзи.
 
     Пример::
 
-        f"{te(PE_SETTINGS, '⚙')} <b>Настройки</b>"
+        f"{te(PE_SETTINGS)} <b>Настройки</b>"
 
-    Не-премиум пользователи увидят просто ``⚙``, премиум — анимированную
-    иконку из стикерпака Telegram."""
+    Премиум-пользователи видят анимированную иконку Telegram,
+    а вместо дефолтных эмодзи используется аккуратный маркер."""
     return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
 
 

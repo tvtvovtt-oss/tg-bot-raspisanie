@@ -45,7 +45,7 @@ from keyboards import (
 from premium_emoji import (
     te, PE_BOT, PE_CALENDAR, PE_BELL, PE_SEARCH, PE_PEOPLE, PE_INFO, PE_CHECK,
     PE_CLOCK, PE_HOUSE, PE_PERSON_CHECK, PE_TIME_PASSED, PE_STAR, PE_WARNING,
-    PE_WRITE, PE_LINK, PE_REPEAT, PE_ARROW_LEFT
+    PE_WRITE, PE_LINK, PE_REPEAT, PE_ARROW_LEFT, PE_CROSS
 )
 
 router = Router()
@@ -72,18 +72,18 @@ async def safe_edit_text(message: Message, text: str, reply_markup=None):
 
 def build_welcome_text(user, first_name: str) -> str:
     base = (
-        f"{te(PE_BOT, '🤖')} <b>Привет, {html.escape(first_name)}!</b>\n\n"
+        f"{te(PE_BOT)} <b>Привет, {html.escape(first_name)}!</b>\n\n"
         "Я официальный бот по расписанию <b>Альметьевского политехнического техникума</b> (almetpt.ru).\n\n"
     )
     if user and user.get("group_name"):
         base += (
-            f"{te(PE_CHECK, '✅')} Твоя сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n\n"
-            "Выбирай нужное действие кнопками ниже 👇"
+            f"{te(PE_CHECK)} Твоя сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n\n"
+            "Выбирай нужное действие кнопками ниже:"
         )
     else:
         base += (
-            f"{te(PE_WARNING, '⚠️')} <b>Группа ещё не выбрана.</b>\n"
-            "Нажми <b>«🔍 Найти группу»</b>, чтобы выбрать курс кнопками, или просто отправь номер группы сообщением."
+            f"{te(PE_WARNING, '!')} <b>Группа ещё не выбрана.</b>\n"
+            "Нажми <b>«Найти группу»</b>, чтобы выбрать курс кнопками, или просто отправь номер группы сообщением."
         )
     return base
 
@@ -91,11 +91,11 @@ def build_welcome_text(user, first_name: str) -> str:
 def get_menu_text(user) -> str:
     if user and user.get("group_name"):
         return (
-            f"{te(PE_HOUSE, '🏠')} <b>Главное меню</b> — группа: <b>{html.escape(user['group_name'])}</b>\n"
+            f"{te(PE_HOUSE)} <b>Главное меню</b> — группа: <b>{html.escape(user['group_name'])}</b>\n"
             "Выбери нужное действие кнопками:"
         )
     return (
-        f"{te(PE_HOUSE, '🏠')} <b>Главное меню</b>\n"
+        f"{te(PE_HOUSE)} <b>Главное меню</b>\n"
         "Выбери нужное действие кнопками (команды вводить не требуется):"
     )
 
@@ -119,83 +119,83 @@ async def cmd_start(message: Message, state: FSMContext):
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     text = (
-        f"{te(PE_INFO, '📖')} <b>Как пользоваться ботом — всё чисто кнопками:</b>\n\n"
-        f"• {te(PE_CALENDAR, '📅')} <b>На сегодня / На завтра</b> — расписание твоей группы\n"
-        f"• {te(PE_CLOCK, '🗓')} <b>Выбрать дату</b> — расписание на любой доступный день\n"
-        f"• {te(PE_BELL, '🔔')} <b>Звонки</b> — расписание пар и перемен техникума\n"
-        f"• {te(PE_PEOPLE, '👥')} <b>Моя группа</b> — текущая группа и её смена\n"
-        f"• {te(PE_SEARCH, '🔍')} <b>Найти группу</b> — удобный выбор группы по курсу кнопками\n"
-        f"• {te(PE_PERSON_CHECK, '👨‍🏫')} <b>Преподаватели</b> — алфавитный каталог преподавателей чисто кнопками\n\n"
-        f"{te(PE_STAR, '💡')} <i>Подсказка: ты можешь нажать /start один раз и дальше переключаться только кнопками меню!</i>"
+        f"{te(PE_INFO)} <b>Как пользоваться ботом — всё чисто кнопками:</b>\n\n"
+        f"• {te(PE_CALENDAR)} <b>На сегодня / На завтра</b> — расписание твоей группы\n"
+        f"• {te(PE_CLOCK)} <b>Выбрать дату</b> — расписание на любой доступный день\n"
+        f"• {te(PE_BELL)} <b>Звонки</b> — расписание пар и перемен техникума\n"
+        f"• {te(PE_PEOPLE)} <b>Моя группа</b> — текущая группа и её смена\n"
+        f"• {te(PE_SEARCH)} <b>Найти группу</b> — удобный выбор группы по курсу кнопками\n"
+        f"• {te(PE_PERSON_CHECK)} <b>Преподаватели</b> — алфавитный каталог преподавателей чисто кнопками\n\n"
+        f"{te(PE_STAR)} <i>Подсказка: ты можешь нажать /start один раз и дальше переключаться только кнопками меню!</i>"
     )
     await message.answer(text, reply_markup=get_main_keyboard())
 
 
 # ---------- Обработчики текстовых кнопок Reply-клавиатуры ----------
 
-@router.message(F.text.in_({"🔔 Звонки", "Звонки"}))
+@router.message(F.text.in_({"Звонки", "🔔 Звонки"}))
 @router.message(Command("calls"))
 async def cmd_calls(message: Message):
     await message.answer(get_calls_text(), reply_markup=get_calls_keyboard())
 
 
-@router.message(F.text.in_({"👥 Моя группа", "Моя группа"}))
+@router.message(F.text.in_({"Моя группа", "👥 Моя группа"}))
 @router.message(Command("mygroup"))
 async def cmd_my_group(message: Message, state: FSMContext):
     await state.clear()
     user = await get_user(message.from_user.id)
     if user and user.get("group_name"):
         text = (
-            f"{te(PE_PEOPLE, '👥')} <b>Твой профиль:</b>\n\n"
-            f"{te(PE_CHECK, '✅')} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n\n"
-            "Чтобы сменить группу, нажми <b>«🔍 Сменить группу»</b> или просто отправь её номер в чат."
+            f"{te(PE_PEOPLE)} <b>Твой профиль:</b>\n\n"
+            f"{te(PE_CHECK)} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n\n"
+            "Чтобы сменить группу, нажми <b>«Сменить группу»</b> или просто отправь её номер в чат."
         )
     else:
         text = (
-            f"{te(PE_INFO, 'ℹ️')} <b>Группа пока не выбрана!</b>\n\n"
-            "Нажми <b>«🔍 Сменить группу»</b> ниже, чтобы выбрать курс кнопками."
+            f"{te(PE_INFO)} <b>Группа пока не выбрана!</b>\n\n"
+            "Нажми <b>«Сменить группу»</b> ниже, чтобы выбрать курс кнопками."
         )
     await message.answer(text, reply_markup=get_my_group_keyboard())
 
 
-@router.message(F.text.in_({"🔍 Найти группу", "Найти группу"}))
+@router.message(F.text.in_({"Найти группу", "🔍 Найти группу"}))
 @router.message(Command("search"))
 async def cmd_search_group(message: Message, state: FSMContext):
     await state.set_state(BotStates.waiting_for_group_search)
     await message.answer(
-        f"{te(PE_SEARCH, '🔎')} <b>Выбери курс кнопками</b> ниже:\n"
+        f"{te(PE_SEARCH)} <b>Выбери курс кнопками</b> ниже:\n"
         "<i>(или просто отправь номер группы сообщением, например: <code>261</code> или <code>АВ-261</code>)</i>",
         reply_markup=get_course_selection_keyboard()
     )
 
 
-@router.message(F.text.in_({"👨‍🏫 Преподаватели", "Преподаватели"}))
+@router.message(F.text.in_({"Преподаватели", "👨‍🏫 Преподаватели"}))
 @router.message(Command("teachers"))
 async def cmd_search_teacher(message: Message, state: FSMContext):
     await state.set_state(BotStates.waiting_for_teacher_search)
     letters = await get_teacher_letters()
     if not letters:
         await message.answer(
-            f"{te(PE_WARNING, '⚠️')} Не удалось получить список преподавателей с сайта. Попробуй позже.",
+            f"{te(PE_WARNING, '!')} Не удалось получить список преподавателей с сайта. Попробуй позже.",
             reply_markup=get_main_keyboard()
         )
         return
 
     await message.answer(
-        f"{te(PE_PERSON_CHECK, '👨‍🏫')} <b>Выбери первую букву фамилии преподавателя:</b>\n"
+        f"{te(PE_PERSON_CHECK)} <b>Выбери первую букву фамилии преподавателя:</b>\n"
         "<i>(или введи фамилию текстом в чат, например: <code>Агеева</code>)</i>",
         reply_markup=get_teachers_letters_keyboard(letters)
     )
 
 
-@router.message(F.text.in_({"📅 На сегодня", "На сегодня"}))
+@router.message(F.text.in_({"На сегодня", "📅 На сегодня"}))
 @router.message(Command("today"))
 async def cmd_today(message: Message):
     user = await get_user(message.from_user.id)
     if not user or not user.get("group_id"):
         await message.answer(
-            f"{te(PE_WARNING, '⚠️')} <b>Сначала выбери свою группу!</b>\n"
-            "Нажми <b>«🔍 Найти группу»</b> и выбери курс кнопками:",
+            f"{te(PE_WARNING, '!')} <b>Сначала выбери свою группу!</b>\n"
+            "Нажми <b>«Найти группу»</b> и выбери курс кнопками:",
             reply_markup=get_course_selection_keyboard()
         )
         return
@@ -203,7 +203,7 @@ async def cmd_today(message: Message):
     dates_info = await get_available_dates()
     today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
 
-    wait_msg = await message.answer(f"{te(PE_CALENDAR, '📅')} <i>Загружаю расписание с almetpt.ru...</i>")
+    wait_msg = await message.answer(f"{te(PE_CALENDAR)} <i>Загружаю расписание с almetpt.ru...</i>")
     sched = await get_group_schedule(user["group_id"], today_str)
     
     text = format_schedule_message(sched, user["group_name"], today_str, "Сегодня")
@@ -217,13 +217,13 @@ async def cmd_today(message: Message):
     await message.answer(text, reply_markup=kb)
 
 
-@router.message(F.text.in_({"📆 На завтра", "На завтра"}))
+@router.message(F.text.in_({"На завтра", "📆 На завтра"}))
 @router.message(Command("tomorrow"))
 async def cmd_tomorrow(message: Message):
     user = await get_user(message.from_user.id)
     if not user or not user.get("group_id"):
         await message.answer(
-            f"{te(PE_WARNING, '⚠️')} <b>Сначала выбери свою группу!</b>\n"
+            f"{te(PE_WARNING, '!')} <b>Сначала выбери свою группу!</b>\n"
             "Выбери курс кнопками:",
             reply_markup=get_course_selection_keyboard()
         )
@@ -254,7 +254,7 @@ async def cmd_tomorrow(message: Message):
         except Exception:
             tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    wait_msg = await message.answer(f"{te(PE_TIME_PASSED, '📆')} <i>Загружаю расписание на завтра...</i>")
+    wait_msg = await message.answer(f"{te(PE_TIME_PASSED)} <i>Загружаю расписание на завтра...</i>")
     sched = await get_group_schedule(user["group_id"], tomorrow_str)
     
     text = format_schedule_message(sched, user["group_name"], tomorrow_str, "Завтра")
@@ -268,7 +268,7 @@ async def cmd_tomorrow(message: Message):
     await message.answer(text, reply_markup=kb)
 
 
-@router.message(F.text.in_({"🗓 Выбрать дату", "Выбрать дату"}))
+@router.message(F.text.in_({"Выбрать дату", "🗓 Выбрать дату"}))
 @router.message(Command("dates"))
 async def cmd_choose_date(message: Message):
     user = await get_user(message.from_user.id)
@@ -278,11 +278,11 @@ async def cmd_choose_date(message: Message):
     dates_list = dates_info.get("dates", [])
     
     if not dates_list:
-        await message.answer("⚠️ Не удалось получить список дат с сайта.")
+        await message.answer(f"{te(PE_WARNING, '!')} Не удалось получить список дат с сайта.")
         return
 
     kb = get_dates_inline_keyboard(dates_list, target_type="group", target_id=group_id)
-    await message.answer(f"{te(PE_CLOCK, '🗓')} <b>Выбери дату для просмотра расписания:</b>", reply_markup=kb)
+    await message.answer(f"{te(PE_CLOCK)} <b>Выбери дату для просмотра расписания:</b>", reply_markup=kb)
 
 
 # ---------- Интерактивное Inline-меню (MenuCallback) ----------
@@ -304,7 +304,7 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
         if not user or not user.get("group_id"):
             await safe_edit_text(
                 query.message,
-                f"{te(PE_WARNING, '⚠️')} <b>Сначала выбери группу!</b>\nВыбери свой курс кнопками:",
+                f"{te(PE_WARNING, '!')} <b>Сначала выбери группу!</b>\nВыбери свой курс кнопками:",
                 reply_markup=get_course_selection_keyboard()
             )
             return
@@ -319,7 +319,7 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
         if not user or not user.get("group_id"):
             await safe_edit_text(
                 query.message,
-                f"{te(PE_WARNING, '⚠️')} <b>Сначала выбери группу!</b>\nВыбери курс кнопками:",
+                f"{te(PE_WARNING, '!')} <b>Сначала выбери группу!</b>\nВыбери курс кнопками:",
                 reply_markup=get_course_selection_keyboard()
             )
             return
@@ -353,7 +353,7 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
             await query.answer("Не удалось загрузить даты.", show_alert=True)
             return
         kb = get_dates_inline_keyboard(dates_list, target_type="group", target_id=group_id)
-        await safe_edit_text(query.message, f"{te(PE_CLOCK, '🗓')} <b>Выбери дату кнопками:</b>", reply_markup=kb)
+        await safe_edit_text(query.message, f"{te(PE_CLOCK)} <b>Выбери дату кнопками:</b>", reply_markup=kb)
 
     elif action == "calls":
         await safe_edit_text(query.message, get_calls_text(), reply_markup=get_calls_keyboard())
@@ -361,13 +361,13 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
     elif action == "mygroup":
         if user and user.get("group_name"):
             text = (
-                f"{te(PE_PEOPLE, '👥')} <b>Твой профиль:</b>\n\n"
-                f"{te(PE_CHECK, '✅')} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n\n"
-                "Чтобы сменить группу, нажми <b>«🔍 Сменить группу»</b> ниже."
+                f"{te(PE_PEOPLE)} <b>Твой профиль:</b>\n\n"
+                f"{te(PE_CHECK)} Сохранённая группа: <b>{html.escape(user['group_name'])}</b>\n\n"
+                "Чтобы сменить группу, нажми <b>«Сменить группу»</b> ниже."
             )
         else:
             text = (
-                f"{te(PE_INFO, 'ℹ️')} <b>Группа пока не выбрана!</b>\n\n"
+                f"{te(PE_INFO)} <b>Группа пока не выбрана!</b>\n\n"
                 "Выбери свой курс кнопками ниже:"
             )
         await safe_edit_text(query.message, text, reply_markup=get_my_group_keyboard())
@@ -375,7 +375,7 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
     elif action == "groups":
         await safe_edit_text(
             query.message,
-            f"{te(PE_SEARCH, '🔎')} <b>Выбери курс кнопками:</b>",
+            f"{te(PE_SEARCH)} <b>Выбери курс кнопками:</b>",
             reply_markup=get_course_selection_keyboard()
         )
 
@@ -386,7 +386,7 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
             return
         await safe_edit_text(
             query.message,
-            f"{te(PE_PERSON_CHECK, '👨‍🏫')} <b>Выбери первую букву фамилии преподавателя:</b>",
+            f"{te(PE_PERSON_CHECK)} <b>Выбери первую букву фамилии преподавателя:</b>",
             reply_markup=get_teachers_letters_keyboard(letters)
         )
 
@@ -410,7 +410,7 @@ async def cb_teacher_handler(query: CallbackQuery, callback_data: TeacherCallbac
         kb = get_teachers_search_inline_keyboard(teachers, with_back=True)
         await safe_edit_text(
             query.message,
-            f"{te(PE_PERSON_CHECK, '👨‍🏫')} <b>Преподаватели на букву «{letter}» ({len(teachers)}):</b>\nВыбери из списка 👇",
+            f"{te(PE_PERSON_CHECK)} <b>Преподаватели на букву «{letter}» ({len(teachers)}):</b>\nВыбери из списка:",
             reply_markup=kb
         )
 
@@ -428,7 +428,7 @@ async def cb_teacher_handler(query: CallbackQuery, callback_data: TeacherCallbac
 
         await safe_edit_text(
             query.message,
-            f"{te(PE_CLOCK, '⏳')} <i>Загружаю расписание {html.escape(t_name)}...</i>"
+            f"{te(PE_CLOCK)} <i>Загружаю расписание {html.escape(t_name)}...</i>"
         )
 
         sched = await get_teacher_schedule(t_id, today_str)
@@ -454,7 +454,7 @@ async def cb_group_handler(query: CallbackQuery, callback_data: GroupCallback):
         kb = get_groups_search_inline_keyboard(groups)
         await safe_edit_text(
             query.message,
-            f"🎓 <b>Группы {course_num} курса ({len(groups)}):</b>\nВыбери свою группу кнопками:",
+            f"{te(PE_INFO)} <b>Группы {course_num} курса ({len(groups)}):</b>\nВыбери свою группу кнопками:",
             reply_markup=kb
         )
         return
@@ -478,7 +478,7 @@ async def cb_group_handler(query: CallbackQuery, callback_data: GroupCallback):
         
         await safe_edit_text(
             query.message,
-            f"{te(PE_CLOCK, '⏳')} <i>Загружаю расписание группы {html.escape(g_name)}...</i>"
+            f"{te(PE_CLOCK)} <i>Загружаю расписание группы {html.escape(g_name)}...</i>"
         )
 
         sched = await get_group_schedule(g_id, today_str)
@@ -503,7 +503,7 @@ async def cb_date_handler(query: CallbackQuery, callback_data: DateCallback):
         if user and user.get("group_id"):
             target_id = user["group_id"]
         else:
-            await query.answer("⚠️ Сначала выбери группу в меню.", show_alert=True)
+            await query.answer("Сначала выбери группу в меню.", show_alert=True)
             return
 
     if action == "nav":
@@ -554,7 +554,7 @@ async def cb_date_handler(query: CallbackQuery, callback_data: DateCallback):
 async def process_group_search_state(message: Message, state: FSMContext):
     await state.clear()
     if not message.text:
-        await message.answer("⚠️ Отправь название группы или выбери курс кнопками выше.", reply_markup=get_main_keyboard())
+        await message.answer(f"{te(PE_WARNING, '!')} Отправь название группы или выбери курс кнопками выше.", reply_markup=get_main_keyboard())
         return
     await handle_group_search_query(message, message.text.strip())
 
@@ -563,13 +563,13 @@ async def process_group_search_state(message: Message, state: FSMContext):
 async def process_teacher_search_state(message: Message, state: FSMContext):
     await state.clear()
     if not message.text:
-        await message.answer("⚠️ Отправь фамилию преподавателя текстом или выбери букву кнопками.", reply_markup=get_main_keyboard())
+        await message.answer(f"{te(PE_WARNING, '!')} Отправь фамилию преподавателя текстом или выбери букву кнопками.", reply_markup=get_main_keyboard())
         return
     query = message.text.strip()
     teachers = await search_teachers(query)
     if not teachers:
         await message.answer(
-            f"❌ Преподаватели по запросу «<b>{html.escape(query)}</b>» не найдены.\n"
+            f"{te(PE_CROSS, '!')} Преподаватели по запросу «<b>{html.escape(query)}</b>» не найдены.\n"
             "Попробуй выбрать букву кнопками или введи только фамилию (например: <code>Агеева</code>).",
             reply_markup=get_teachers_letters_keyboard(await get_teacher_letters())
         )
@@ -577,7 +577,7 @@ async def process_teacher_search_state(message: Message, state: FSMContext):
 
     kb = get_teachers_search_inline_keyboard(teachers, with_back=True)
     await message.answer(
-        f"{te(PE_PERSON_CHECK, '👨‍🏫')} <b>Найденные преподаватели ({len(teachers)}):</b>\nВыбери из списка:",
+        f"{te(PE_PERSON_CHECK)} <b>Найденные преподаватели ({len(teachers)}):</b>\nВыбери из списка:",
         reply_markup=kb
     )
 
@@ -597,7 +597,7 @@ async def process_any_text(message: Message, state: FSMContext):
         if teachers:
             kb = get_teachers_search_inline_keyboard(teachers, with_back=False)
             await message.answer(
-                f"{te(PE_PERSON_CHECK, '👨‍🏫')} <b>Найденные преподаватели ({len(teachers)}):</b>\nВыбери из списка:",
+                f"{te(PE_PERSON_CHECK)} <b>Найденные преподаватели ({len(teachers)}):</b>\nВыбери из списка:",
                 reply_markup=kb
             )
             return
@@ -614,7 +614,7 @@ async def handle_group_search_query(message: Message, query: str, preloaded_grou
     
     if not groups:
         await message.answer(
-            f"❌ Группы по запросу «<b>{html.escape(query)}</b>» не найдены.\n"
+            f"{te(PE_CROSS, '!')} Группы по запросу «<b>{html.escape(query)}</b>» не найдены.\n"
             "Выбери курс кнопками или укажи корректный номер (например: <code>261</code> или <code>АВ-261</code>):",
             reply_markup=get_course_selection_keyboard()
         )
@@ -632,7 +632,7 @@ async def handle_group_search_query(message: Message, query: str, preloaded_grou
         dates_info = await get_available_dates()
         today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
 
-        wait_msg = await message.answer(f"{te(PE_CHECK, '✅')} Выбрана группа <b>{html.escape(g['name'])}</b>!\nЗагружаю расписание...")
+        wait_msg = await message.answer(f"{te(PE_CHECK)} Выбрана группа <b>{html.escape(g['name'])}</b>!\nЗагружаю расписание...")
         sched = await get_group_schedule(str(g["id"]), today_str)
         text = format_schedule_message(sched, g["name"], today_str, "Сегодня")
         web_url = sched.get("url")
@@ -647,6 +647,6 @@ async def handle_group_search_query(message: Message, query: str, preloaded_grou
 
     kb = get_groups_search_inline_keyboard(groups)
     await message.answer(
-        f"{te(PE_SEARCH, '🔍')} <b>Найдено групп: {len(groups)}</b>\nВыбери свою группу:",
+        f"{te(PE_SEARCH)} <b>Найдено групп: {len(groups)}</b>\nВыбери свою группу:",
         reply_markup=kb
     )

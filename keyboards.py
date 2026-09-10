@@ -38,41 +38,41 @@ class MenuCallback(CallbackData, prefix="menu"):
     action: str  # "home", "today", "tomorrow", "dates", "calls", "mygroup", "teachers", "groups"
 
 
-# ---------- Reply-клавиатура (премиум-иконки на кнопках) ----------
+# ---------- Reply-клавиатура (только премиум-иконки, чистый текст без дефолт-эмодзи) ----------
 
 def get_main_keyboard() -> ReplyKeyboardMarkup:
-    """Главная reply-клавиатура: нажал /start один раз — дальше только кнопками."""
+    """Главная reply-клавиатура: текст без дефолтных эмодзи, только премиум-иконки слева."""
     kb = [
         [
-            KeyboardButton(text="📅 На сегодня", icon_custom_emoji_id=PE_CALENDAR),
-            KeyboardButton(text="📆 На завтра", icon_custom_emoji_id=PE_TIME_PASSED)
+            KeyboardButton(text="На сегодня", icon_custom_emoji_id=PE_CALENDAR),
+            KeyboardButton(text="На завтра", icon_custom_emoji_id=PE_TIME_PASSED)
         ],
         [
-            KeyboardButton(text="🗓 Выбрать дату", icon_custom_emoji_id=PE_CLOCK),
-            KeyboardButton(text="🔔 Звонки", icon_custom_emoji_id=PE_BELL)
+            KeyboardButton(text="Выбрать дату", icon_custom_emoji_id=PE_CLOCK),
+            KeyboardButton(text="Звонки", icon_custom_emoji_id=PE_BELL)
         ],
         [
-            KeyboardButton(text="👥 Моя группа", icon_custom_emoji_id=PE_PEOPLE),
-            KeyboardButton(text="🔍 Найти группу", icon_custom_emoji_id=PE_SEARCH)
+            KeyboardButton(text="Моя группа", icon_custom_emoji_id=PE_PEOPLE),
+            KeyboardButton(text="Найти группу", icon_custom_emoji_id=PE_SEARCH)
         ],
         [
-            KeyboardButton(text="👨‍🏫 Преподаватели", icon_custom_emoji_id=PE_PERSON_CHECK)
+            KeyboardButton(text="Преподаватели", icon_custom_emoji_id=PE_PERSON_CHECK)
         ]
     ]
     return ReplyKeyboardMarkup(
         keyboard=kb,
         resize_keyboard=True,
-        input_field_placeholder="Выбирай действие кнопками 👇"
+        input_field_placeholder="Выбирай действие кнопками"
     )
 
 
 # ---------- Общие вспомогательные кнопки ----------
 
 def get_home_button_row() -> List[InlineKeyboardButton]:
-    """Строка с кнопкой «🏠 Главное меню»."""
+    """Строка с кнопкой «Главное меню» (только премиум-иконка)."""
     return [
         InlineKeyboardButton(
-            text="🏠 Главное меню",
+            text="Главное меню",
             icon_custom_emoji_id=PE_HOUSE,
             callback_data=MenuCallback(action="home").pack()
         )
@@ -82,49 +82,49 @@ def get_home_button_row() -> List[InlineKeyboardButton]:
 # ---------- Inline: главное интерактивное меню ----------
 
 def get_main_menu_inline() -> InlineKeyboardMarkup:
-    """Инлайн-меню: полностью автономное управление всеми функциями бота."""
+    """Инлайн-меню: чистый текст с премиум-иконками без дефолтных эмодзи."""
     rows = [
         [
             InlineKeyboardButton(
-                text="📅 Расписание на сегодня",
+                text="Расписание на сегодня",
                 icon_custom_emoji_id=PE_CALENDAR,
                 callback_data=MenuCallback(action="today").pack()
             )
         ],
         [
             InlineKeyboardButton(
-                text="📆 Расписание на завтра",
+                text="Расписание на завтра",
                 icon_custom_emoji_id=PE_TIME_PASSED,
                 callback_data=MenuCallback(action="tomorrow").pack()
             )
         ],
         [
             InlineKeyboardButton(
-                text="🗓 Выбрать дату",
+                text="Выбрать дату",
                 icon_custom_emoji_id=PE_CLOCK,
                 callback_data=MenuCallback(action="dates").pack()
             ),
             InlineKeyboardButton(
-                text="🔔 Звонки",
+                text="Звонки",
                 icon_custom_emoji_id=PE_BELL,
                 callback_data=MenuCallback(action="calls").pack()
             )
         ],
         [
             InlineKeyboardButton(
-                text="👥 Моя группа",
+                text="Моя группа",
                 icon_custom_emoji_id=PE_PEOPLE,
                 callback_data=MenuCallback(action="mygroup").pack()
             ),
             InlineKeyboardButton(
-                text="🔍 Найти группу",
+                text="Найти группу",
                 icon_custom_emoji_id=PE_SEARCH,
                 callback_data=MenuCallback(action="groups").pack()
             )
         ],
         [
             InlineKeyboardButton(
-                text="👨‍🏫 Расписание преподавателей",
+                text="Преподаватели",
                 icon_custom_emoji_id=PE_PERSON_CHECK,
                 callback_data=MenuCallback(action="teachers").pack()
             )
@@ -146,8 +146,6 @@ def get_dates_inline_keyboard(
     for d in dates:
         dt = d["date"]
         label = d.get("day_name", "") or d.get("label", dt)
-        if d.get("is_today"):
-            label = f"📍 {label}"
         
         btn = InlineKeyboardButton(
             text=label,
@@ -173,15 +171,15 @@ def get_dates_inline_keyboard(
 # ---------- Inline: группы и курсы ----------
 
 def get_course_selection_keyboard() -> InlineKeyboardMarkup:
-    """Выбор курса чисто кнопками: 1–4 курс + назад в меню."""
+    """Выбор курса чисто кнопками: 1–4 курс (без дефолтных эмодзи) + назад в меню."""
     buttons = [
         [
-            InlineKeyboardButton(text="1️⃣ 1 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=1).pack()),
-            InlineKeyboardButton(text="2️⃣ 2 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=2).pack())
+            InlineKeyboardButton(text="1 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=1).pack()),
+            InlineKeyboardButton(text="2 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=2).pack())
         ],
         [
-            InlineKeyboardButton(text="3️⃣ 3 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=3).pack()),
-            InlineKeyboardButton(text="4️⃣ 4 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=4).pack())
+            InlineKeyboardButton(text="3 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=3).pack()),
+            InlineKeyboardButton(text="4 курс", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=4).pack())
         ],
         get_home_button_row()
     ]
@@ -189,20 +187,20 @@ def get_course_selection_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_groups_search_inline_keyboard(groups: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
-    """Список найденных групп / групп курса с кнопками назад."""
+    """Список найденных групп / групп курса с премиум-иконками."""
     buttons: List[List[InlineKeyboardButton]] = []
     for g in groups[:20]:
         name = g.get("out_name") or g.get("name")
         buttons.append([
             InlineKeyboardButton(
-                text=f"👥 {name}",
+                text=name,
                 icon_custom_emoji_id=PE_PEOPLE,
                 callback_data=GroupCallback(action="select", group_id=str(g["id"])).pack()
             )
         ])
     buttons.append([
         InlineKeyboardButton(
-            text="⬅️ К выбору курса",
+            text="К выбору курса",
             icon_custom_emoji_id=PE_ARROW_LEFT,
             callback_data=MenuCallback(action="groups").pack()
         )
@@ -237,13 +235,13 @@ def get_teachers_search_inline_keyboard(
     teachers: List[Dict[str, Any]],
     with_back: bool = True
 ) -> InlineKeyboardMarkup:
-    """Список преподавателей с кнопкой возврата к алфавиту и в меню."""
+    """Список преподавателей с премиум-иконками (без дефолт-эмодзи в тексте)."""
     buttons: List[List[InlineKeyboardButton]] = []
     for t in teachers[:25]:
         fio = t.get("short_fio") or t.get("fio")
         buttons.append([
             InlineKeyboardButton(
-                text=f"👨‍🏫 {fio}",
+                text=fio,
                 icon_custom_emoji_id=PE_PERSON_CHECK,
                 callback_data=TeacherCallback(
                     action="select",
@@ -254,7 +252,7 @@ def get_teachers_search_inline_keyboard(
     if with_back:
         buttons.append([
             InlineKeyboardButton(
-                text="⬅️ К алфавиту",
+                text="К алфавиту",
                 icon_custom_emoji_id=PE_ARROW_LEFT,
                 callback_data=MenuCallback(action="teachers").pack()
             )
@@ -270,11 +268,11 @@ def get_schedule_nav_inline_keyboard(
     date_str: str,
     web_url: Optional[str] = None
 ) -> InlineKeyboardMarkup:
-    """Кнопки под расписанием группы: обновить, дата, на завтра, меню, сайт."""
+    """Кнопки под расписанием: обновить, дата, на завтра, меню, сайт."""
     buttons = [
         [
             InlineKeyboardButton(
-                text="🔄 Обновить",
+                text="Обновить",
                 icon_custom_emoji_id=PE_REPEAT,
                 callback_data=DateCallback(
                     action="pick",
@@ -284,7 +282,7 @@ def get_schedule_nav_inline_keyboard(
                 ).pack()
             ),
             InlineKeyboardButton(
-                text="🗓 Другая дата",
+                text="Другая дата",
                 icon_custom_emoji_id=PE_CLOCK,
                 callback_data=DateCallback(
                     action="nav",
@@ -296,12 +294,12 @@ def get_schedule_nav_inline_keyboard(
         ],
         [
             InlineKeyboardButton(
-                text="📆 На завтра",
+                text="На завтра",
                 icon_custom_emoji_id=PE_TIME_PASSED,
                 callback_data=MenuCallback(action="tomorrow").pack()
             ),
             InlineKeyboardButton(
-                text="🏠 Меню",
+                text="Главное меню",
                 icon_custom_emoji_id=PE_HOUSE,
                 callback_data=MenuCallback(action="home").pack()
             )
@@ -311,7 +309,7 @@ def get_schedule_nav_inline_keyboard(
     if web_url:
         buttons.append([
             InlineKeyboardButton(
-                text="🌐 Открыть на сайте almetpt.ru",
+                text="Открыть на almetpt.ru",
                 icon_custom_emoji_id=PE_LINK,
                 url=web_url
             )
@@ -329,7 +327,7 @@ def get_teacher_schedule_nav_inline_keyboard(
     buttons = [
         [
             InlineKeyboardButton(
-                text="🔄 Обновить",
+                text="Обновить",
                 icon_custom_emoji_id=PE_REPEAT,
                 callback_data=DateCallback(
                     action="pick",
@@ -339,7 +337,7 @@ def get_teacher_schedule_nav_inline_keyboard(
                 ).pack()
             ),
             InlineKeyboardButton(
-                text="🗓 Другая дата",
+                text="Другая дата",
                 icon_custom_emoji_id=PE_CLOCK,
                 callback_data=DateCallback(
                     action="nav",
@@ -351,12 +349,12 @@ def get_teacher_schedule_nav_inline_keyboard(
         ],
         [
             InlineKeyboardButton(
-                text="👨‍🏫 К преподавателям",
+                text="К преподавателям",
                 icon_custom_emoji_id=PE_PERSON_CHECK,
                 callback_data=MenuCallback(action="teachers").pack()
             ),
             InlineKeyboardButton(
-                text="🏠 Меню",
+                text="Главное меню",
                 icon_custom_emoji_id=PE_HOUSE,
                 callback_data=MenuCallback(action="home").pack()
             )
@@ -366,7 +364,7 @@ def get_teacher_schedule_nav_inline_keyboard(
     if web_url:
         buttons.append([
             InlineKeyboardButton(
-                text="🌐 Открыть на сайте almetpt.ru",
+                text="Открыть на almetpt.ru",
                 icon_custom_emoji_id=PE_LINK,
                 url=web_url
             )
@@ -385,7 +383,7 @@ def get_my_group_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="🔍 Сменить группу",
+                text="Сменить группу",
                 icon_custom_emoji_id=PE_SEARCH,
                 callback_data=MenuCallback(action="groups").pack()
             )

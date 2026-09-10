@@ -489,18 +489,18 @@ def format_schedule_message(
     date_str: str,
     day_label: Optional[str] = None
 ) -> str:
-    """Formats group schedule into a rich Telegram HTML message with premium emojis."""
+    """Formats group schedule into a Telegram HTML message styled exclusively with premium emojis."""
     if not data.get("success", True):
-        return f"{te(PE_WARNING, '⚠️')} <b>Ошибка получения расписания:</b>\n{html.escape(data.get('error', 'Неизвестная ошибка'))}"
+        return f"{te(PE_WARNING, '!')} <b>Ошибка получения расписания:</b>\n{html.escape(data.get('error', 'Неизвестная ошибка'))}"
 
     lines = []
     header_title = data.get("header") or f"Расписание группы {group_name}"
-    lines.append(f"{te(PE_CLOCK, '📚')} <b>{html.escape(header_title)}</b>")
+    lines.append(f"{te(PE_CLOCK, '•')} <b>{html.escape(header_title)}</b>")
     
     if day_label:
-        lines.append(f"{te(PE_GEOTAG, '🗓')} <b>Дата:</b> <code>{html.escape(date_str)}</code> ({html.escape(day_label)})")
+        lines.append(f"{te(PE_CALENDAR, '•')} <b>Дата:</b> <code>{html.escape(date_str)}</code> ({html.escape(day_label)})")
     else:
-        lines.append(f"{te(PE_GEOTAG, '🗓')} <b>Дата:</b> <code>{html.escape(date_str)}</code>")
+        lines.append(f"{te(PE_CALENDAR, '•')} <b>Дата:</b> <code>{html.escape(date_str)}</code>")
 
     lines.append("────────────────────")
 
@@ -508,23 +508,17 @@ def format_schedule_message(
     if not lessons:
         alerts = data.get("alerts", [])
         if alerts:
-            lines.append(f"\n{te(PE_INFO, 'ℹ️')} <i>{html.escape(alerts[0])}</i>")
+            lines.append(f"\n{te(PE_INFO, '•')} <i>{html.escape(alerts[0])}</i>")
         else:
-            lines.append(f"\n{te(PE_PARTY, '🎉')} <b>Пар нет!</b> В этот день занятия отсутствуют или расписание ещё не опубликовано.")
+            lines.append(f"\n{te(PE_PARTY, '•')} <b>Пар нет!</b> В этот день занятия отсутствуют или расписание ещё не опубликовано.")
         return "\n".join(lines)
-
-    pair_emojis = {
-        "I": "1️⃣", "II": "2️⃣", "III": "3️⃣", "IV": "4️⃣",
-        "V": "5️⃣", "VI": "6️⃣", "VII": "7️⃣", "VIII": "8️⃣"
-    }
 
     for l in lessons:
         p_num = l.get("pair", "")
-        p_emoji = pair_emojis.get(p_num, te(PE_STAR, "🔹"))
         p_time = l.get("time", "")
         p_time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", p_time)
         
-        lines.append(f"\n{p_emoji} <b>{html.escape(p_num)} пара</b> <code>[{html.escape(p_time_clean)}]</code>")
+        lines.append(f"\n{te(PE_CLOCK, '•')} <b>{html.escape(p_num)} пара</b> <code>[{html.escape(p_time_clean)}]</code>")
 
         items = l.get("items", [])
         if not items:
@@ -538,23 +532,23 @@ def format_schedule_message(
                 if item.get("audience"):
                     aud_text = item["audience"]
                     if "on-line" in aud_text.lower():
-                        aud = f" {te(PE_LINK, '🌐')} <i>(дистант)</i>"
+                        aud = f" {te(PE_LINK, '•')} <i>(дистант)</i>"
                     else:
-                        aud = f" {te(PE_HOUSE, '🚪')} <i>(каб. {html.escape(aud_text)})</i>"
+                        aud = f" {te(PE_HOUSE, '•')} <i>(каб. {html.escape(aud_text)})</i>"
 
-                teach = f"\n   {te(PE_PERSON_CHECK, '👤')} {html.escape(item['teacher'])}" if item.get("teacher") else ""
+                teach = f"\n   {te(PE_PERSON_CHECK, '•')} {html.escape(item['teacher'])}" if item.get("teacher") else ""
                 lines.append(f"  • {sub}{subj}{aud}{teach}")
 
                 if item.get("homework"):
                     hw_text = item['homework']
                     if len(hw_text) > 300:
                         hw_text = hw_text[:297] + "..."
-                    lines.append(f"   {te(PE_PENCIL, '📝')} <b>Д/З:</b> <i>{html.escape(hw_text)}</i>")
+                    lines.append(f"   {te(PE_PENCIL, '•')} <b>Д/З:</b> <i>{html.escape(hw_text)}</i>")
                 elif item.get("topic"):
                     top_text = item['topic']
                     if len(top_text) > 200:
                         top_text = top_text[:197] + "..."
-                    lines.append(f"   {te(PE_FILE, '📖')} <b>Тема:</b> <i>{html.escape(top_text)}</i>")
+                    lines.append(f"   {te(PE_FILE, '•')} <b>Тема:</b> <i>{html.escape(top_text)}</i>")
 
     msg_text = "\n".join(lines)
     if len(msg_text) > 4000:
@@ -567,18 +561,18 @@ def format_teacher_schedule_message(
     teacher_name: str,
     date_str: str
 ) -> str:
-    """Formats teacher schedule into Telegram HTML with premium emojis."""
+    """Formats teacher schedule into Telegram HTML styled exclusively with premium emojis."""
     if not data.get("success", True):
-        return f"{te(PE_WARNING, '⚠️')} <b>Ошибка:</b>\n{html.escape(data.get('error', ''))}"
+        return f"{te(PE_WARNING, '!')} <b>Ошибка:</b>\n{html.escape(data.get('error', ''))}"
 
     lines = []
-    lines.append(f"{te(PE_PERSON_CHECK, '👨‍🏫')} <b>Расписание преподавателя:</b>\n<b>{html.escape(teacher_name)}</b>")
-    lines.append(f"{te(PE_GEOTAG, '🗓')} <b>Дата:</b> <code>{html.escape(date_str)}</code>")
+    lines.append(f"{te(PE_PERSON_CHECK, '•')} <b>Расписание преподавателя:</b>\n<b>{html.escape(teacher_name)}</b>")
+    lines.append(f"{te(PE_CALENDAR, '•')} <b>Дата:</b> <code>{html.escape(date_str)}</code>")
     lines.append("────────────────────")
 
     lessons = data.get("lessons", [])
     if not lessons:
-        lines.append(f"\n{te(PE_PARTY, '🎉')} <b>Пар нет!</b> В этот день у преподавателя нет занятий.")
+        lines.append(f"\n{te(PE_PARTY, '•')} <b>Пар нет!</b> В этот день у преподавателя нет занятий.")
         return "\n".join(lines)
 
     for l in lessons:
@@ -586,15 +580,15 @@ def format_teacher_schedule_message(
         p_time = l.get("time", "")
         p_time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", p_time)
         
-        lines.append(f"\n{te(PE_CLOCK, '🔹')} <b>{html.escape(p_num)} пара</b> <code>[{html.escape(p_time_clean)}]</code>")
+        lines.append(f"\n{te(PE_CLOCK, '•')} <b>{html.escape(p_num)} пара</b> <code>[{html.escape(p_time_clean)}]</code>")
         if l.get("group"):
-            lines.append(f"   {te(PE_PEOPLE, '👥')} Группа: <b>{html.escape(l['group'])}</b>")
+            lines.append(f"   {te(PE_PEOPLE, '•')} Группа: <b>{html.escape(l['group'])}</b>")
         if l.get("audience"):
             aud = l['audience']
-            aud_str = f"{te(PE_LINK, '🌐')} Дистант" if "on-line" in aud.lower() else f"{te(PE_HOUSE, '🚪')} Каб. {html.escape(aud)}"
+            aud_str = f"{te(PE_LINK, '•')} Дистант" if "on-line" in aud.lower() else f"{te(PE_HOUSE, '•')} Каб. {html.escape(aud)}"
             lines.append(f"   {aud_str}")
         if l.get("details"):
-            lines.append(f"   ℹ️ <i>{html.escape(l['details'])}</i>")
+            lines.append(f"   {te(PE_INFO, '•')} <i>{html.escape(l['details'])}</i>")
 
     msg_text = "\n".join(lines)
     if len(msg_text) > 4000:
@@ -603,15 +597,15 @@ def format_teacher_schedule_message(
 
 
 def get_calls_text() -> str:
-    """Returns звонки table with premium emojis."""
+    """Returns звонки table styled exclusively with premium emojis."""
     return (
-        f"{te(PE_BELL, '🔔')} <b>Расписание звонков ГАПОУ «АПТ»:</b>\n\n"
-        f"1️⃣ <b>I пара:</b> <code>08:00 – 09:20</code> <i>(перемена 10 мин)</i>\n"
-        f"2️⃣ <b>II пара:</b> <code>09:30 – 10:50</code> <i>(большая перемена 30 мин)</i>\n"
-        f"3️⃣ <b>III пара:</b> <code>11:20 – 12:40</code> <i>(перемена 10 мин)</i>\n"
-        f"4️⃣ <b>IV пара:</b> <code>12:50 – 14:10</code> <i>(перемена 10 мин)</i>\n"
-        f"5️⃣ <b>V пара:</b> <code>14:20 – 15:40</code> <i>(перемена 10 мин)</i>\n"
-        f"6️⃣ <b>VI пара:</b> <code>15:50 – 17:10</code> <i>(перемена 5 мин)</i>\n"
-        f"7️⃣ <b>VII пара:</b> <code>17:15 – 18:35</code> <i>(перемена 5 мин)</i>\n"
-        f"8️⃣ <b>VIII пара:</b> <code>18:40 – 20:00</code>"
+        f"{te(PE_BELL, '•')} <b>Расписание звонков ГАПОУ «АПТ»:</b>\n\n"
+        f"{te(PE_CLOCK, '•')} <b>I пара:</b> <code>08:00 – 09:20</code> <i>(перемена 10 мин)</i>\n"
+        f"{te(PE_CLOCK, '•')} <b>II пара:</b> <code>09:30 – 10:50</code> <i>(большая перемена 30 мин)</i>\n"
+        f"{te(PE_CLOCK, '•')} <b>III пара:</b> <code>11:20 – 12:40</code> <i>(перемена 10 мин)</i>\n"
+        f"{te(PE_CLOCK, '•')} <b>IV пара:</b> <code>12:50 – 14:10</code> <i>(перемена 10 мин)</i>\n"
+        f"{te(PE_CLOCK, '•')} <b>V пара:</b> <code>14:20 – 15:40</code> <i>(перемена 10 мин)</i>\n"
+        f"{te(PE_CLOCK, '•')} <b>VI пара:</b> <code>15:50 – 17:10</code> <i>(перемена 5 мин)</i>\n"
+        f"{te(PE_CLOCK, '•')} <b>VII пара:</b> <code>17:15 – 18:35</code> <i>(перемена 5 мин)</i>\n"
+        f"{te(PE_CLOCK, '•')} <b>VIII пара:</b> <code>18:40 – 20:00</code>"
     )
