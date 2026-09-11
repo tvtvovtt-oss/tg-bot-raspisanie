@@ -58,7 +58,7 @@ class StatAdminCallback(CallbackData, prefix="sta"):
 
 # ---------- Reply-клавиатура (только премиум-иконки, чистый текст без дефолт-эмодзи) ----------
 
-def get_main_keyboard(is_admin_user: bool = False) -> ReplyKeyboardMarkup:
+def get_main_keyboard(is_admin_user: bool = False, is_stat_admin_user: bool = False) -> ReplyKeyboardMarkup:
     """Главная reply-клавиатура: текст без дефолтных эмодзи, только премиум-иконки слева."""
     kb = [
         [
@@ -73,6 +73,10 @@ def get_main_keyboard(is_admin_user: bool = False) -> ReplyKeyboardMarkup:
     if is_admin_user:
         kb.append([
             KeyboardButton(text="Панель администратора", icon_custom_emoji_id=PE_SETTINGS),
+            KeyboardButton(text="Статистика", icon_custom_emoji_id=PE_CHART_STATS)
+        ])
+    elif is_stat_admin_user:
+        kb.append([
             KeyboardButton(text="Статистика", icon_custom_emoji_id=PE_CHART_STATS)
         ])
     return ReplyKeyboardMarkup(
@@ -97,7 +101,7 @@ def get_home_button_row() -> List[InlineKeyboardButton]:
 
 # ---------- Inline: главное интерактивное меню ----------
 
-def get_main_menu_inline(is_admin_user: bool = False) -> InlineKeyboardMarkup:
+def get_main_menu_inline(is_admin_user: bool = False, is_stat_admin_user: bool = False) -> InlineKeyboardMarkup:
     """Инлайн-меню: чистый текст с премиум-иконками без дефолтных эмодзи."""
     rows = [
         [
@@ -134,6 +138,14 @@ def get_main_menu_inline(is_admin_user: bool = False) -> InlineKeyboardMarkup:
                 icon_custom_emoji_id=PE_SETTINGS,
                 callback_data=MenuCallback(action="admin").pack()
             ),
+            InlineKeyboardButton(
+                text="Статистика и рассылки",
+                icon_custom_emoji_id=PE_CHART_STATS,
+                callback_data=StatAdminCallback(action="menu").pack()
+            )
+        ])
+    elif is_stat_admin_user:
+        rows.append([
             InlineKeyboardButton(
                 text="Статистика и рассылки",
                 icon_custom_emoji_id=PE_CHART_STATS,

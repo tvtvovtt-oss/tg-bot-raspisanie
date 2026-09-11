@@ -14,7 +14,8 @@ from aiogram.fsm.state import State, StatesGroup
 from database import (
     get_user, ensure_user, set_user_group, set_user_teacher, toggle_user_notifications,
     is_admin, is_stat_admin, is_maintenance_mode, set_maintenance_mode, get_bot_stats, get_all_user_ids,
-    create_broadcast, get_broadcast, get_broadcasts, get_broadcasts_count, cancel_broadcast, get_broadcasts_summary
+    create_broadcast, get_broadcast, get_broadcasts, get_broadcasts_count, cancel_broadcast, get_broadcasts_summary,
+    add_admin, remove_admin, get_admins, add_stat_admin, remove_stat_admin, get_stat_admins
 )
 from broadcast_service import execute_broadcast
 from parser import (
@@ -191,6 +192,20 @@ def render_profile_text(user: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
+async def get_user_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    """Возвращает reply-клавиатуру с учётом ролей администратора и стат-администратора."""
+    is_adm = await is_admin(user_id)
+    is_stat = await is_stat_admin(user_id)
+    return get_main_keyboard(is_admin_user=is_adm, is_stat_admin_user=is_stat)
+
+
+async def get_user_main_menu_inline(user_id: int) -> InlineKeyboardMarkup:
+    """Возвращает inline-меню с учётом ролей администратора и стат-администратора."""
+    is_adm = await is_admin(user_id)
+    is_stat = await is_stat_admin(user_id)
+    return get_main_menu_inline(is_admin_user=is_adm, is_stat_admin_user=is_stat)
+
+
 # ---------- Команды ----------
 
 @router.message(CommandStart())
@@ -204,19 +219,20 @@ async def cmd_start(message: Message, state: FSMContext):
     )
     user = await get_user(message.from_user.id)
     first_name = message.from_user.first_name or "студент"
-    is_adm = await is_admin(message.from_user.id)
+    
+    reply_kb = await get_user_main_keyboard(message.from_user.id)
+    inline_kb = await get_user_main_menu_inline(message.from_user.id)
     
     await safe_answer(
         message,
         build_welcome_text(user, first_name),
-        reply_markup=get_main_keyboard(is_admin_user=is_adm)
+        reply_markup=reply_kb
     )
-    await safe_answer(message, get_menu_text(user), reply_markup=get_main_menu_inline(is_admin_user=is_adm))
+    await safe_answer(message, get_menu_text(user), reply_markup=inline_kb)
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    is_adm = await is_admin(message.from_user.id)
     text = (
         f"{te(PE_INFO)} <b>Как пользоваться ботом:</b>\n\n"
         f"• {te(PE_CALENDAR)} <b>На сегодня / На завтра</b> — расписание твоей группы\n"
@@ -225,7 +241,7 @@ async def cmd_help(message: Message):
         f"{te(PE_SEARCH)} <b>Быстрый поиск группы:</b> просто отправь в чат её номер или первые буквы (например: <code>ИС</code>, <code>253</code> или <code>АВ-261</code>)!\n\n"
         f"{te(PE_STAR)} <i>Подсказка: ты можешь нажать /start один раз и дальше переключаться кнопками меню!</i>"
     )
-    await safe_answer(message, text, reply_markup=get_main_keyboard(is_admin_user=is_adm))
+    await safe_answer(message, text, reply_markup=await get_user_main_keyboard(message.from_user.id))
 
 
 # ---------- Обработчики текстовых кнопок Reply-клавиатуры ----------
@@ -278,7 +294,7 @@ async def cmd_search_teacher(message: Message, state: FSMContext):
         await safe_answer(
             message,
             f"{te(PE_WARNING, '!')} Не удалось получить список преподавателей с сайта. Попробуй позже.",
-            reply_markup=get_main_keyboard()
+            reply_markup=await get_user_main_keyboard(message.from_user.id)
         )
         return
 
@@ -379,9 +395,8 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
 
     if action == "home":
         # Возврат в главное меню
-        is_adm = await is_admin(query.from_user.id)
         text = get_menu_text(user)
-        kb = get_main_menu_inline(is_admin_user=is_adm)
+        kb = await get_user_main_menu_inline(query.from_user.id)
         await safe_edit_text(query.message, text, reply_markup=kb)
 
     elif action == "admin":
@@ -662,7 +677,7 @@ async def cb_date_handler(query: CallbackQuery, callback_data: DateCallback):
 async def process_group_search_state(message: Message, state: FSMContext):
     await state.clear()
     if not message.text:
-        await safe_answer(message, f"{te(PE_WARNING, '!')} Отправь номер или первые буквы группы.", reply_markup=get_main_keyboard())
+        await safe_answer(message, f"{te(PE_WARNING, '!')} Отправь номер или первые буквы группы.", reply_markup=await get_user_main_keyboard(message.from_user.id))
         return
     await handle_group_search_query(message, message.text.strip())
 
@@ -671,7 +686,7 @@ async def process_group_search_state(message: Message, state: FSMContext):
 async def process_teacher_search_state(message: Message, state: FSMContext):
     await state.clear()
     if not message.text:
-        await safe_answer(message, f"{te(PE_WARNING, '!')} Отправь фамилию преподавателя текстом или выбери букву кнопками.", reply_markup=get_main_keyboard())
+        await safe_answer(message, f"{te(PE_WARNING, '!')} Отправь фамилию преподавателя текстом или выбери букву кнопками.", reply_markup=await get_user_main_keyboard(message.from_user.id))
         return
     query = message.text.strip()
     teachers = await search_teachers(query)
@@ -756,7 +771,7 @@ async def process_any_text(message: Message, state: FSMContext):
         message,
         f"{te(PE_CROSS, '!')} По запросу «<b>{html.escape(text)}</b>» ничего не найдено.\n\n"
         f"{te(PE_STAR)} <b>Подсказка:</b> чтобы найти группу, отправь в чат её номер или первые буквы (например: <code>ИС</code>, <code>253</code> или <code>АВ-261</code>).",
-        reply_markup=get_main_menu_inline()
+        reply_markup=await get_user_main_menu_inline(message.from_user.id)
     )
 
 
@@ -1544,4 +1559,91 @@ async def cb_stat_admin_handler(query: CallbackQuery, callback_data: StatAdminCa
             await query.message.delete()
         except Exception:
             pass
+
+
+# ---------- Управление правами администраторов и стат-администраторов ----------
+
+@router.message(Command("addstatadmin"), StateFilter("*"))
+async def cmd_add_stat_admin(message: Message):
+    """Назначение пользователя стат-администратором."""
+    if not await is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await safe_answer(message, f"{te(PE_INFO)} Использование: <code>/addstatadmin &lt;telegram_id&gt;</code>")
+        return
+    target_id = int(parts[1])
+    await add_stat_admin(target_id)
+    await safe_answer(message, f"{te(PE_CHECK)} Пользователь <code>{target_id}</code> назначен стат-администратором!")
+
+
+@router.message(Command("delstatadmin"), StateFilter("*"))
+async def cmd_del_stat_admin(message: Message):
+    """Снятие прав стат-администратора."""
+    if not await is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await safe_answer(message, f"{te(PE_INFO)} Использование: <code>/delstatadmin &lt;telegram_id&gt;</code>")
+        return
+    target_id = int(parts[1])
+    res = await remove_stat_admin(target_id)
+    if res:
+        await safe_answer(message, f"{te(PE_CHECK)} Пользователь <code>{target_id}</code> больше не является стат-администратором.")
+    else:
+        await safe_answer(message, f"{te(PE_WARNING, '!')} Не удалось снять права (возможно, пользователь указан в .env STAT_ADMIN_IDS).")
+
+
+@router.message(Command("statadmins"), StateFilter("*"))
+async def cmd_stat_admins_list(message: Message):
+    """Просмотр списка стат-администраторов."""
+    if not await is_admin(message.from_user.id):
+        return
+    admins = await get_stat_admins()
+    if not admins:
+        await safe_answer(message, f"{te(PE_INFO)} Список стат-администраторов пуст.")
+        return
+    lines = [f"• <code>{a}</code>" for a in admins]
+    await safe_answer(message, f"{te(PE_CHART_STATS)} <b>Стат-администраторы ({len(admins)}):</b>\n\n" + "\n".join(lines))
+
+
+@router.message(Command("addadmin"), StateFilter("*"))
+async def cmd_add_admin(message: Message):
+    """Добавление администратора."""
+    if not await is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await safe_answer(message, f"{te(PE_INFO)} Использование: <code>/addadmin &lt;telegram_id&gt;</code>")
+        return
+    target_id = int(parts[1])
+    await add_admin(target_id)
+    await safe_answer(message, f"{te(PE_CHECK)} Пользователь <code>{target_id}</code> добавлен в администраторы бота!")
+
+
+@router.message(Command("deladmin"), StateFilter("*"))
+async def cmd_del_admin(message: Message):
+    """Удаление администратора."""
+    if not await is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await safe_answer(message, f"{te(PE_INFO)} Использование: <code>/deladmin &lt;telegram_id&gt;</code>")
+        return
+    target_id = int(parts[1])
+    res = await remove_admin(target_id)
+    if res:
+        await safe_answer(message, f"{te(PE_CHECK)} Пользователь <code>{target_id}</code> удален из администраторов.")
+    else:
+        await safe_answer(message, f"{te(PE_WARNING, '!')} Нельзя удалить корневого администратора из .env ADMIN_IDS.")
+
+
+@router.message(Command("admins"), StateFilter("*"))
+async def cmd_admins_list(message: Message):
+    """Просмотр списка администраторов."""
+    if not await is_admin(message.from_user.id):
+        return
+    admins = await get_admins()
+    lines = [f"• <code>{a}</code>" for a in admins]
+    await safe_answer(message, f"{te(PE_SETTINGS)} <b>Администраторы бота ({len(admins)}):</b>\n\n" + "\n".join(lines))
 
