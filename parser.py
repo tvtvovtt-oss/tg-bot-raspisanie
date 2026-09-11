@@ -11,7 +11,7 @@ from premium_emoji import (
     te, PE_CALENDAR, PE_CLOCK, PE_BELL, PE_PEOPLE, PE_SEARCH,
     PE_HOUSE, PE_ARROW_LEFT, PE_REPEAT, PE_LINK,
     PE_PERSON_CHECK, PE_INFO, PE_CHECK, PE_PARTY, PE_WARNING,
-    PE_GEOTAG, PE_STAR, PE_TIME_PASSED
+    PE_GEOTAG, PE_STAR, PE_TIME_PASSED, PE_MEGAPHONE
 )
 
 # Caching containers
@@ -742,6 +742,7 @@ async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool =
                     teacher = staff_tag.get("title") or staff_tag.get_text(strip=True)
                 
                 subj = ""
+                subj_code = ""
                 b_tag = sdiv.find("b")
                 small_tag = sdiv.find("small")
                 if b_tag:
@@ -749,8 +750,9 @@ async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool =
                     sm_txt = small_tag.get_text(strip=True) if small_tag else ""
                     if "консультац" in b_txt.lower() or "консультац" in sm_txt.lower():
                         subj = "Консультация"
-                    elif sm_txt and b_txt != sm_txt and len(sm_txt) > len(b_txt):
-                        subj = sm_txt if len(b_txt) <= 3 else f"{b_txt} ({sm_txt})"
+                    elif sm_txt and b_txt != sm_txt:
+                        subj = sm_txt
+                        subj_code = b_txt
                     else:
                         subj = b_txt
                 else:
@@ -784,6 +786,7 @@ async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool =
                         subgroup_rows.append({
                             "subgroup": sub_label,
                             "subject": subj,
+                            "subject_code": subj_code,
                             "teacher": teacher,
                             "audience": aud,
                             "homework": hw,
@@ -961,11 +964,35 @@ async def get_teacher_schedule(staff_id: str, date_str: str, force_refresh: bool
         if grp_tag:
             grp = grp_tag.get_text(strip=True)
 
+        if not grp and card_body:
+            group_match = re.search(
+                r"\bгр\.?\s*([A-Za-zА-Яа-яЁё0-9-]+)",
+                body_text,
+                re.IGNORECASE
+            )
+            if group_match:
+                grp = group_match.group(1).strip()
+
+        subject = ""
+        subject_code = ""
+        if card_body:
+            subject_tag = card_body.find("b")
+            subject_name_tag = card_body.find("small") if subject_tag else None
+            subject_code = subject_tag.get_text(strip=True) if subject_tag else ""
+            subject_name = subject_name_tag.get_text(strip=True) if subject_name_tag else ""
+            if subject_name and subject_name != subject_code:
+                subject = subject_name
+            else:
+                subject = subject_code
+                subject_code = ""
+
         lessons.append({
             "pair": pair_num,
             "time": pair_time,
             "audience": aud,
             "group": grp,
+            "subject": subject,
+            "subject_code": subject_code,
             "details": body_text
         })
 
@@ -1125,6 +1152,79 @@ def safe_join_lines(lines: List[str], max_len: int = 3800) -> str:
     return "\n".join(safe_lines).strip()
 
 
+EVENT_SUBJECT_MARKERS = (
+    "мероприят",
+    "классный час",
+    "разговоры о важном",
+    "#будущего"
+)
+
+
+def is_event_subject(subject: str) -> bool:
+    """Определяет мероприятия, которые сайт присылает внутри обычных пар."""
+    normalized = subject.strip().lower()
+    return any(marker in normalized for marker in EVENT_SUBJECT_MARKERS)
+
+
+def is_consultation_subject(subject: str) -> bool:
+    return "консультац" in subject.strip().lower()
+
+
+def is_practice_subject(subject: str) -> bool:
+    return "практик" in subject.strip().lower()
+
+
+def format_schedule_time(time_str: str) -> str:
+    """Возвращает единый компактный диапазон времени для сообщения."""
+    t1, t2, _, _ = parse_pair_times(time_str)
+    if t1 and t2:
+        return f"<code>{t1}–{t2}</code>"
+    if not time_str:
+        return ""
+    time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", time_str.strip())
+    return f"<code>{html.escape(time_clean)}</code>"
+
+
+def get_break_after(parsed_lessons: List[Dict[str, Any]], index: int) -> Optional[int]:
+    """Считает продолжительность перемены после пары."""
+    if index + 1 >= len(parsed_lessons):
+        return None
+
+    current = parsed_lessons[index]
+    next_lesson = parsed_lessons[index + 1]
+    if current.get("dt2") and next_lesson.get("dt1"):
+        diff = int((next_lesson["dt1"] - current["dt2"]).total_seconds() / 60)
+        if diff > 0:
+            return diff
+
+    pair_value = re.search(r"\d+", str(current["lesson"].get("pair", "")))
+    pair_number = int(pair_value.group(0)) if pair_value else (index + 1)
+    return STANDARD_BREAKS.get(pair_number, 10)
+
+
+def append_schedule_card(lines: List[str], title: str, details: List[str]) -> None:
+    """Добавляет визуально отделённую карточку занятия."""
+    safe_title = html.escape(title.strip() or "Занятие не указано")
+    lines.append(f"┌ <b>{safe_title}</b>")
+    if not details:
+        lines.append("└ <i>Подробности не указаны</i>")
+        return
+
+    for index, detail in enumerate(details):
+        branch = "└" if index == len(details) - 1 else "├"
+        lines.append(f"{branch} {detail}")
+
+
+def schedule_room_detail(audience: str) -> Optional[str]:
+    """Форматирует кабинет или дистанционный формат."""
+    audience = audience.strip()
+    if not audience:
+        return None
+    if "on-line" in audience.lower() or "онлайн" in audience.lower():
+        return "Формат: <b>дистант</b>"
+    return f"Кабинет: <b>{html.escape(audience)}</b>"
+
+
 def format_schedule_message(
     data: Dict[str, Any],
     group_name: str,
@@ -1142,7 +1242,7 @@ def format_schedule_message(
         date_line = f"{te(PE_CALENDAR)} {human_date}"
 
     lines = [
-        f"{te(PE_PEOPLE)} <b>Расписание группы {html.escape(group_name)}</b>",
+        f"{te(PE_PEOPLE)} <b>Группа {html.escape(group_name)}</b>",
         date_line,
         ""
     ]
@@ -1160,35 +1260,47 @@ def format_schedule_message(
         return "\n".join(lines)
 
     if practices:
-        lines.append(f"{te(PE_STAR)} <b>Практика:</b>")
-        for p in practices:
-            p_title = html.escape(p.get("title") or "Практика")
-            aud = p.get("audience", "").strip()
-            aud_part = f" <i>(ауд. {html.escape(aud)})</i>" if aud else ""
-            lines.append(f"  <b>{p_title}</b>{aud_part}")
-
-            leader = p.get("leader", "").strip()
+        lines.append(f"{te(PE_STAR)} <b>ПРАКТИКА</b>")
+        for index, practice in enumerate(practices):
+            details = []
+            title = practice.get("name", "").strip() or practice.get("title") or "Практика"
+            room_detail = schedule_room_detail(practice.get("audience", ""))
+            if room_detail:
+                details.append(room_detail)
+            leader = practice.get("leader", "").strip()
             if leader:
-                lines.append(f"   {te(PE_PERSON_CHECK)} <i>Рук.: {html.escape(leader)}</i>")
-
-            note = p.get("note", "").strip()
+                details.append(f"Руководитель: {html.escape(leader)}")
+            note = practice.get("note", "").strip()
             if note:
-                lines.append(f"   {te(PE_INFO)} <i>{html.escape(note)}</i>")
+                details.append(f"Примечание: <i>{html.escape(note)}</i>")
+            append_schedule_card(lines, title, details)
+            if index + 1 < len(practices):
+                lines.append("")
         lines.append("")
 
     if consultations:
-        lines.append(f"{te(PE_INFO)} <b>Консультации преподавателей:</b>")
-        for c in consultations:
-            c_title = html.escape(c.get("title") or "Консультация")
-            sub_part = f"{html.escape(c['subgroup'])} " if c.get("subgroup") else ""
-            t_part = f" — {html.escape(c['teacher'])}" if c.get("teacher") else ""
-            aud = c.get("audience", "").strip()
-            if aud:
-                aud_part = " <i>(дистант)</i>" if "on-line" in aud.lower() else f" (каб. {html.escape(aud)})"
-            else:
-                aud_part = ""
-            time_part = f" [{html.escape(c['time'])}]" if c.get("time") else ""
-            lines.append(f"  • {sub_part}<b>{c_title}</b>{aud_part}{t_part}{time_part}")
+        lines.append(f"{te(PE_INFO)} <b>КОНСУЛЬТАЦИИ</b>")
+        for index, consultation in enumerate(consultations):
+            details = []
+            time_detail = format_schedule_time(consultation.get("time", ""))
+            if time_detail:
+                details.append(f"Время: {time_detail}")
+            subgroup = consultation.get("subgroup", "").strip()
+            if subgroup:
+                details.append(f"Подгруппа: <b>{html.escape(subgroup)}</b>")
+            room_detail = schedule_room_detail(consultation.get("audience", ""))
+            if room_detail:
+                details.append(room_detail)
+            teacher = consultation.get("teacher", "").strip()
+            if teacher:
+                details.append(f"Преподаватель: {html.escape(teacher)}")
+            append_schedule_card(
+                lines,
+                consultation.get("title") or "Консультация",
+                details
+            )
+            if index + 1 < len(consultations):
+                lines.append("")
         lines.append("")
 
     if not lessons and (practices or consultations):
@@ -1211,73 +1323,53 @@ def format_schedule_message(
             "dt2": dt2
         })
 
-    for i, item in enumerate(parsed_lessons):
-        l = item["lesson"]
-        p_num = to_roman_pair(l.get("pair", ""))
-
-        # Format time part: "с 08:00 по 09:30"
-        if item["t1"] and item["t2"]:
-            time_part = f" с {item['t1']} по {item['t2']}"
-        elif l.get("time"):
-            time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", l.get("time", "").strip())
-            time_part = f" [{html.escape(time_clean)}]"
+    for lesson_index, parsed_lesson in enumerate(parsed_lessons):
+        lesson = parsed_lesson["lesson"]
+        pair_number = to_roman_pair(lesson.get("pair", ""))
+        subgroup_items = lesson.get("items", [])
+        subjects = [subgroup.get("subject", "") for subgroup in subgroup_items]
+        if subjects and all(is_consultation_subject(subject) for subject in subjects):
+            heading = f"КОНСУЛЬТАЦИЯ · {pair_number} ПАРА"
+            heading_icon = PE_INFO
+        elif subjects and all(is_practice_subject(subject) for subject in subjects):
+            heading = f"ПРАКТИКА · {pair_number} ПАРА"
+            heading_icon = PE_STAR
+        elif subjects and all(is_event_subject(subject) for subject in subjects):
+            heading = f"МЕРОПРИЯТИЕ · {pair_number} ПАРА"
+            heading_icon = PE_MEGAPHONE
         else:
-            time_part = ""
+            heading = f"{pair_number} ПАРА"
+            heading_icon = PE_CLOCK
+        time_part = format_schedule_time(lesson.get("time", ""))
+        time_suffix = f"  {time_part}" if time_part else ""
+        lines.append(f"{te(heading_icon)} <b>{heading}</b>{time_suffix}")
 
-        # Calculate break after this pair if next pair exists (for each pair)
-        break_str = ""
-        if i + 1 < len(parsed_lessons):
-            next_dt1 = parsed_lessons[i + 1]["dt1"]
-            curr_dt2 = item["dt2"]
-            diff_min = 0
-            if next_dt1 and curr_dt2:
-                diff_min = int((next_dt1 - curr_dt2).total_seconds() / 60)
-            if diff_min <= 0:
-                p_digit = re.search(r"\d+", str(l.get("pair", "")))
-                p_val = int(p_digit.group(0)) if p_digit else (i + 1)
-                diff_min = STANDARD_BREAKS.get(p_val, 10)
-
-            if diff_min > 0:
-                break_str = f" <i>(Перемена {format_minutes_ru(diff_min)})</i>"
-
-        # Pair header line
-        lines.append(f"{te(PE_CLOCK)} <b>{p_num} пара{time_part}</b>{break_str}")
-
-        subgroup_items = l.get("items", [])
         if not subgroup_items:
-            lines.append("  <i>Занятие не указано</i>")
+            append_schedule_card(lines, "Занятие не указано", [])
         else:
-            for sub in subgroup_items:
-                # Subgroup text: "1 п/гр. "
-                sg = sub.get("subgroup", "").strip()
-                if sg:
-                    if not sg.endswith("."):
-                        sg += "."
-                    sg_part = f"{html.escape(sg)} "
-                else:
-                    sg_part = ""
+            for subgroup_index, subgroup in enumerate(subgroup_items):
+                details = []
+                subgroup_name = subgroup.get("subgroup", "").strip()
+                if subgroup_name:
+                    details.append(f"Подгруппа: <b>{html.escape(subgroup_name)}</b>")
+                room_detail = schedule_room_detail(subgroup.get("audience", ""))
+                if room_detail:
+                    details.append(room_detail)
+                teacher = subgroup.get("teacher", "").strip()
+                if teacher:
+                    details.append(f"Преподаватель: {html.escape(teacher)}")
+                append_schedule_card(
+                    lines,
+                    subgroup.get("subject") or "Предмет не указан",
+                    details
+                )
+                if subgroup_index + 1 < len(subgroup_items):
+                    lines.append("")
 
-                # Subject: "#Будущего"
-                subj = sub.get("subject", "").strip() or "Предмет не указан"
-                subj_escaped = html.escape(subj)
-
-                # Audience: "(233)" or "(дистант)"
-                aud = sub.get("audience", "").strip()
-                if aud:
-                    if "on-line" in aud.lower():
-                        aud_part = " <i>(дистант)</i>"
-                    else:
-                        aud_part = f" ({html.escape(aud)})"
-                else:
-                    aud_part = ""
-
-                # Teacher: "Тухбатуллина Р.А."
-                teacher = sub.get("teacher", "").strip()
-                teacher_part = f" {html.escape(teacher)}" if teacher else ""
-
-                lines.append(f" {sg_part}{subj_escaped}{aud_part}{teacher_part}")
-
-        lines.append("")  # Empty line between pairs
+        break_minutes = get_break_after(parsed_lessons, lesson_index)
+        if break_minutes:
+            lines.append(f"{te(PE_TIME_PASSED)} <i>Перемена: {format_minutes_ru(break_minutes)}</i>")
+        lines.append("")
 
     return safe_join_lines(lines)
 
@@ -1293,8 +1385,7 @@ def format_teacher_schedule_message(
 
     human_date = format_russian_date(date_str)
     lines = [
-        f"{te(PE_PERSON_CHECK)} <b>Расписание преподавателя:</b>",
-        f"<b>{html.escape(teacher_name)}</b>",
+        f"{te(PE_PERSON_CHECK)} <b>{html.escape(teacher_name)}</b>",
         f"{te(PE_CALENDAR)} {human_date}",
         ""
     ]
@@ -1308,27 +1399,41 @@ def format_teacher_schedule_message(
         return "\n".join(lines)
 
     if practices:
-        lines.append(f"{te(PE_STAR)} <b>Практика (руководство):</b>")
-        for p in practices:
-            grp = p.get("group", "").strip()
-            grp_part = f" <b>{html.escape(grp)}</b> — " if grp else " "
-            p_title = html.escape(p.get("title") or "Практика")
-            lines.append(f" {grp_part}{p_title}")
+        lines.append(f"{te(PE_STAR)} <b>ПРАКТИКА</b>")
+        for index, practice in enumerate(practices):
+            details = []
+            group = practice.get("group", "").strip()
+            if group:
+                details.append(f"Группа: <b>{html.escape(group)}</b>")
+            title = practice.get("name", "").strip() or practice.get("title") or "Практика"
+            append_schedule_card(lines, title, details)
+            if index + 1 < len(practices):
+                lines.append("")
         lines.append("")
 
     if consultations:
-        lines.append(f"{te(PE_INFO)} <b>Консультации:</b>")
-        for c in consultations:
-            sub_part = f"{html.escape(c['subgroup'])} " if c.get("subgroup") else ""
-            c_title = html.escape(c.get("title") or "Консультация")
-            grp_part = f" — гр. <b>{html.escape(c['group'])}</b>" if c.get("group") else ""
-            aud = c.get("audience", "").strip()
-            if aud:
-                aud_part = " <i>(дистант)</i>" if "on-line" in aud.lower() else f" (каб. {html.escape(aud)})"
-            else:
-                aud_part = ""
-            time_part = f" [{html.escape(c['time'])}]" if c.get("time") else ""
-            lines.append(f"  • {sub_part}<b>{c_title}</b>{grp_part}{aud_part}{time_part}")
+        lines.append(f"{te(PE_INFO)} <b>КОНСУЛЬТАЦИИ</b>")
+        for index, consultation in enumerate(consultations):
+            details = []
+            time_detail = format_schedule_time(consultation.get("time", ""))
+            if time_detail:
+                details.append(f"Время: {time_detail}")
+            group = consultation.get("group", "").strip()
+            if group:
+                details.append(f"Группа: <b>{html.escape(group)}</b>")
+            subgroup = consultation.get("subgroup", "").strip()
+            if subgroup:
+                details.append(f"Подгруппа: <b>{html.escape(subgroup)}</b>")
+            room_detail = schedule_room_detail(consultation.get("audience", ""))
+            if room_detail:
+                details.append(room_detail)
+            append_schedule_card(
+                lines,
+                consultation.get("title") or "Консультация",
+                details
+            )
+            if index + 1 < len(consultations):
+                lines.append("")
         lines.append("")
 
     if not lessons and (practices or consultations):
@@ -1350,57 +1455,45 @@ def format_teacher_schedule_message(
             "dt2": dt2
         })
 
-    for i, item in enumerate(parsed_lessons):
-        l = item["lesson"]
-        p_num = to_roman_pair(l.get("pair", ""))
-
-        if item["t1"] and item["t2"]:
-            time_part = f" с {item['t1']} по {item['t2']}"
-        elif l.get("time"):
-            time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", l.get("time", "").strip())
-            time_part = f" [{html.escape(time_clean)}]"
-        else:
-            time_part = ""
-
-        break_str = ""
-        if i + 1 < len(parsed_lessons):
-            next_dt1 = parsed_lessons[i + 1]["dt1"]
-            curr_dt2 = item["dt2"]
-            diff_min = 0
-            if next_dt1 and curr_dt2:
-                diff_min = int((next_dt1 - curr_dt2).total_seconds() / 60)
-            if diff_min <= 0:
-                p_digit = re.search(r"\d+", str(l.get("pair", "")))
-                p_val = int(p_digit.group(0)) if p_digit else (i + 1)
-                diff_min = STANDARD_BREAKS.get(p_val, 10)
-
-            if diff_min > 0:
-                break_str = f" <i>(Перемена {format_minutes_ru(diff_min)})</i>"
-
-        lines.append(f"{te(PE_CLOCK)} <b>{p_num} пара{time_part}</b>{break_str}")
-
-        grp_part = f"<b>{html.escape(l['group'])}</b>" if l.get("group") else ""
-        aud = l.get("audience", "").strip()
-        if aud:
-            aud_part = " <i>(дистант)</i>" if "on-line" in aud.lower() else f" ({html.escape(aud)})"
-        else:
-            aud_part = ""
-
-        details = l.get("details", "").strip()
-        # На странице преподавателя тема и домашнее задание входят в общий
-        # текст карточки. Не выводим эту часть в расписании бота.
-        details = re.split(
+    for lesson_index, parsed_lesson in enumerate(parsed_lessons):
+        lesson = parsed_lesson["lesson"]
+        pair_number = to_roman_pair(lesson.get("pair", ""))
+        subject = lesson.get("subject", "").strip()
+        fallback_details = re.split(
             r"\b(?:Тема|Д\.?\s*/?\s*з)\s*:",
-            details,
+            lesson.get("details", "").strip(),
             maxsplit=1,
             flags=re.IGNORECASE
         )[0].strip()
-        details_part = f" {html.escape(details)}" if details else ""
+        title = subject or fallback_details or "Занятие не указано"
+        if is_consultation_subject(title):
+            heading = f"КОНСУЛЬТАЦИЯ · {pair_number} ПАРА"
+            heading_icon = PE_INFO
+        elif is_practice_subject(title):
+            heading = f"ПРАКТИКА · {pair_number} ПАРА"
+            heading_icon = PE_STAR
+        elif is_event_subject(title):
+            heading = f"МЕРОПРИЯТИЕ · {pair_number} ПАРА"
+            heading_icon = PE_MEGAPHONE
+        else:
+            heading = f"{pair_number} ПАРА"
+            heading_icon = PE_CLOCK
+        time_part = format_schedule_time(lesson.get("time", ""))
+        time_suffix = f"  {time_part}" if time_part else ""
+        lines.append(f"{te(heading_icon)} <b>{heading}</b>{time_suffix}")
 
-        line_body = f"{grp_part}{aud_part}{details_part}".strip()
-        if line_body:
-            lines.append(f" {line_body}")
+        details = []
+        group = lesson.get("group", "").strip()
+        if group:
+            details.append(f"Группа: <b>{html.escape(group)}</b>")
+        room_detail = schedule_room_detail(lesson.get("audience", ""))
+        if room_detail:
+            details.append(room_detail)
+        append_schedule_card(lines, title, details)
 
+        break_minutes = get_break_after(parsed_lessons, lesson_index)
+        if break_minutes:
+            lines.append(f"{te(PE_TIME_PASSED)} <i>Перемена: {format_minutes_ru(break_minutes)}</i>")
         lines.append("")
 
     return safe_join_lines(lines)
