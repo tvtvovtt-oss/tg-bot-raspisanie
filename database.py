@@ -2,16 +2,17 @@ import aiosqlite
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Set
-from config import DATABASE_PATH, ADMIN_IDS
+from config import DATABASE_PATH, ADMIN_IDS, STAT_ADMIN_IDS
 
 logger = logging.getLogger(__name__)
 
 _MAINTENANCE_CACHE: Optional[bool] = None
 _ADMIN_IDS_CACHE: Optional[Set[int]] = None
+_STAT_ADMIN_IDS_CACHE: Optional[Set[int]] = None
 
 
 async def init_db():
-    global _MAINTENANCE_CACHE, _ADMIN_IDS_CACHE
+    global _MAINTENANCE_CACHE, _ADMIN_IDS_CACHE, _STAT_ADMIN_IDS_CACHE
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -57,6 +58,40 @@ async def init_db():
             )
         """)
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_stat_admins (
+                user_id INTEGER PRIMARY KEY,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS broadcasts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_by INTEGER,
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                scheduled_at TEXT,
+                message_text TEXT,
+                pin_message INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                repeat_type TEXT DEFAULT 'once',
+                repeat_time TEXT,
+                total_targets INTEGER DEFAULT 0,
+                sent_count INTEGER DEFAULT 0,
+                blocked_count INTEGER DEFAULT 0,
+                failed_count INTEGER DEFAULT 0,
+                completed_at TEXT
+            )
+        """)
+        try:
+            await db.execute("ALTER TABLE broadcasts ADD COLUMN repeat_type TEXT DEFAULT 'once'")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE broadcasts ADD COLUMN repeat_time TEXT")
+        except Exception:
+            pass
+
         # Clean up any mistakenly recorded future dates so users will receive the real notifications once published
         try:
             tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -67,6 +102,10 @@ async def init_db():
         # Seed bot_admins from config.ADMIN_IDS
         for a_id in ADMIN_IDS:
             await db.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (a_id,))
+
+        # Seed bot_stat_admins from config.STAT_ADMIN_IDS
+        for sa_id in STAT_ADMIN_IDS:
+            await db.execute("INSERT OR IGNORE INTO bot_stat_admins (user_id) VALUES (?)", (sa_id,))
 
         await db.commit()
 
@@ -85,6 +124,14 @@ async def init_db():
                 _ADMIN_IDS_CACHE = set(ADMIN_IDS) | {r[0] for r in rows}
         except Exception:
             _ADMIN_IDS_CACHE = set(ADMIN_IDS)
+
+        # Load stat admin ids cache
+        try:
+            async with db.execute("SELECT user_id FROM bot_stat_admins") as cursor:
+                rows = await cursor.fetchall()
+                _STAT_ADMIN_IDS_CACHE = set(STAT_ADMIN_IDS) | {r[0] for r in rows}
+        except Exception:
+            _STAT_ADMIN_IDS_CACHE = set(STAT_ADMIN_IDS)
 
 
 async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
@@ -309,8 +356,67 @@ async def get_admins() -> List[int]:
         return list(ADMIN_IDS)
 
 
+async def is_stat_admin(user_id: int) -> bool:
+    """Проверяет, имеет ли пользователь доступ к просмотру статистики."""
+    global _STAT_ADMIN_IDS_CACHE
+    if await is_admin(user_id):
+        return True
+    if user_id in STAT_ADMIN_IDS:
+        return True
+    if _STAT_ADMIN_IDS_CACHE is not None:
+        return user_id in _STAT_ADMIN_IDS_CACHE
+    try:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            async with db.execute("SELECT 1 FROM bot_stat_admins WHERE user_id = ?", (user_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+async def add_stat_admin(user_id: int):
+    """Добавляет пользователя с правами просмотра статистики."""
+    global _STAT_ADMIN_IDS_CACHE
+    if _STAT_ADMIN_IDS_CACHE is not None:
+        _STAT_ADMIN_IDS_CACHE.add(user_id)
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("INSERT OR IGNORE INTO bot_stat_admins (user_id) VALUES (?)", (user_id,))
+        await db.commit()
+
+
+async def remove_stat_admin(user_id: int) -> bool:
+    """Удаляет права просмотра статистики у пользователя."""
+    global _STAT_ADMIN_IDS_CACHE
+    if user_id in STAT_ADMIN_IDS:
+        return False
+    if _STAT_ADMIN_IDS_CACHE is not None and user_id in _STAT_ADMIN_IDS_CACHE:
+        _STAT_ADMIN_IDS_CACHE.discard(user_id)
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("DELETE FROM bot_stat_admins WHERE user_id = ?", (user_id,))
+        await db.commit()
+    return True
+
+
+async def get_stat_admins() -> List[int]:
+    """Возвращает список ID всех администраторов статистики."""
+    global _STAT_ADMIN_IDS_CACHE
+    if _STAT_ADMIN_IDS_CACHE is not None:
+        return list(_STAT_ADMIN_IDS_CACHE)
+    try:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            async with db.execute("SELECT user_id FROM bot_stat_admins") as cursor:
+                rows = await cursor.fetchall()
+                s = set(STAT_ADMIN_IDS) | {r[0] for r in rows}
+                _STAT_ADMIN_IDS_CACHE = s
+                return list(s)
+    except Exception:
+        return list(STAT_ADMIN_IDS)
+
+
 async def get_bot_stats() -> Dict[str, Any]:
-    """Возвращает общую статистику по пользователям для админ-панели."""
+    """Возвращает расширенную статистику по пользователям и активности для админ-панели."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         async with db.execute("SELECT count(*) FROM users") as c:
             total_users = (await c.fetchone())[0]
@@ -324,6 +430,17 @@ async def get_bot_stats() -> Dict[str, Any]:
         async with db.execute("SELECT count(*) FROM users WHERE teacher_id IS NOT NULL AND teacher_id != ''") as c:
             with_teacher = (await c.fetchone())[0]
 
+        # Активность за последние 24 часа и 7 дней
+        now = datetime.now()
+        day_ago = (now - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        week_ago = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+
+        async with db.execute("SELECT count(*) FROM users WHERE updated_at >= ?", (day_ago,)) as c:
+            active_today = (await c.fetchone())[0]
+
+        async with db.execute("SELECT count(*) FROM users WHERE updated_at >= ?", (week_ago,)) as c:
+            active_week = (await c.fetchone())[0]
+
         async with db.execute("""
             SELECT group_name, count(*) as cnt
             FROM users
@@ -334,12 +451,27 @@ async def get_bot_stats() -> Dict[str, Any]:
         """) as c:
             top_groups = await c.fetchall()
 
+        # Общая статистика по рассылкам
+        async with db.execute("SELECT count(*) FROM broadcasts") as c:
+            total_broadcasts = (await c.fetchone())[0]
+
+        async with db.execute("SELECT count(*) FROM broadcasts WHERE status = 'scheduled'") as c:
+            scheduled_broadcasts = (await c.fetchone())[0]
+
+        async with db.execute("SELECT COALESCE(SUM(sent_count), 0) FROM broadcasts WHERE status = 'completed'") as c:
+            total_sent_broadcast_messages = (await c.fetchone())[0]
+
         return {
             "total": total_users,
             "with_notif": with_notif,
             "with_group": with_group,
             "with_teacher": with_teacher,
-            "top_groups": [(r[0], r[1]) for r in top_groups]
+            "active_today": active_today,
+            "active_week": active_week,
+            "top_groups": [(r[0], r[1]) for r in top_groups],
+            "total_broadcasts": total_broadcasts,
+            "scheduled_broadcasts": scheduled_broadcasts,
+            "total_sent_broadcast_messages": total_sent_broadcast_messages
         }
 
 
@@ -349,3 +481,157 @@ async def get_all_user_ids() -> List[int]:
         async with db.execute("SELECT user_id FROM users") as c:
             rows = await c.fetchall()
             return [r[0] for r in rows]
+
+
+# ---------- Методы работы с рассылками (таблица broadcasts) ----------
+
+async def create_broadcast(
+    created_by: int,
+    message_text: str,
+    pin_message: bool = False,
+    scheduled_at: Optional[str] = None,
+    repeat_type: str = "once",
+    repeat_time: Optional[str] = None
+) -> int:
+    """Создает запись о новой рассылке. Возвращает broadcast_id."""
+    status = "scheduled" if scheduled_at else "pending"
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute("""
+            INSERT INTO broadcasts (
+                created_by, created_at, scheduled_at, message_text,
+                pin_message, status, repeat_type, repeat_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            created_by,
+            now_str,
+            scheduled_at,
+            message_text,
+            1 if pin_message else 0,
+            status,
+            repeat_type,
+            repeat_time
+        ))
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_broadcast(broadcast_id: int) -> Optional[Dict[str, Any]]:
+    """Возвращает информацию о конкретной рассылке."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM broadcasts WHERE id = ?", (broadcast_id,)) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def get_broadcasts(limit: int = 10, offset: int = 0) -> List[Dict[str, Any]]:
+    """Возвращает список рассылок, отсортированных по дате создания (новые сначала)."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = "SELECT * FROM broadcasts ORDER BY id DESC LIMIT ? OFFSET ?"
+        async with db.execute(query, (limit, offset)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def get_broadcasts_count() -> int:
+    """Возвращает общее количество созданных рассылок."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT count(*) FROM broadcasts") as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+
+async def get_due_scheduled_broadcasts() -> List[Dict[str, Any]]:
+    """Возвращает список запланированных рассылок, время выполнения которых уже наступило."""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = """
+            SELECT * FROM broadcasts
+            WHERE status = 'scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= ?
+            ORDER BY scheduled_at ASC
+        """
+        async with db.execute(query, (now_str,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def update_broadcast_status(
+    broadcast_id: int,
+    status: str,
+    total_targets: Optional[int] = None,
+    sent_count: Optional[int] = None,
+    blocked_count: Optional[int] = None,
+    failed_count: Optional[int] = None,
+    completed_at: Optional[str] = None,
+    scheduled_at: Optional[str] = None
+):
+    """Обновляет статус и результаты выполнения рассылки."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            UPDATE broadcasts SET
+                status = ?,
+                total_targets = COALESCE(?, total_targets),
+                sent_count = COALESCE(?, sent_count),
+                blocked_count = COALESCE(?, blocked_count),
+                failed_count = COALESCE(?, failed_count),
+                completed_at = COALESCE(?, completed_at),
+                scheduled_at = COALESCE(?, scheduled_at)
+            WHERE id = ?
+        """, (status, total_targets, sent_count, blocked_count, failed_count, completed_at, scheduled_at, broadcast_id))
+        await db.commit()
+
+
+async def cancel_broadcast(broadcast_id: int) -> bool:
+    """Отменяет запланированную рассылку, если она еще не начала выполняться."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT status FROM broadcasts WHERE id = ?", (broadcast_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row or row[0] != "scheduled":
+                return False
+
+        await db.execute("UPDATE broadcasts SET status = 'cancelled' WHERE id = ?", (broadcast_id,))
+        await db.commit()
+        return True
+
+
+async def get_broadcasts_summary() -> Dict[str, Any]:
+    """Возвращает сводную статистику по всем рассылкам."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT count(*) FROM broadcasts") as c:
+            total = (await c.fetchone())[0]
+
+        async with db.execute("SELECT count(*) FROM broadcasts WHERE status = 'completed'") as c:
+            completed = (await c.fetchone())[0]
+
+        async with db.execute("SELECT count(*) FROM broadcasts WHERE status = 'scheduled'") as c:
+            scheduled = (await c.fetchone())[0]
+
+        async with db.execute("SELECT count(*) FROM broadcasts WHERE status = 'cancelled'") as c:
+            cancelled = (await c.fetchone())[0]
+
+        async with db.execute("""
+            SELECT
+                COALESCE(SUM(total_targets), 0),
+                COALESCE(SUM(sent_count), 0),
+                COALESCE(SUM(blocked_count), 0),
+                COALESCE(SUM(failed_count), 0)
+            FROM broadcasts
+            WHERE status = 'completed'
+        """) as c:
+            row = await c.fetchone()
+            sum_targets, sum_sent, sum_blocked, sum_failed = row
+
+        return {
+            "total": total,
+            "completed": completed,
+            "scheduled": scheduled,
+            "cancelled": cancelled,
+            "sum_targets": sum_targets,
+            "sum_sent": sum_sent,
+            "sum_blocked": sum_blocked,
+            "sum_failed": sum_failed
+        }
+

@@ -9,10 +9,10 @@ from aiogram.filters.callback_data import CallbackData
 
 from premium_emoji import (
     PE_CALENDAR, PE_TIME_PASSED, PE_BELL, PE_PEOPLE, PE_SEARCH,
-    PE_HOUSE, PE_ARROW_LEFT, PE_REPEAT, PE_LINK,
+    PE_HOUSE, PE_ARROW_LEFT, PE_ARROW_RIGHT, PE_REPEAT, PE_LINK,
     PE_PERSON_CHECK, PE_CLOCK, PE_INFO, PE_CHECK,
     PE_SETTINGS, PE_LOCK_CLOSED, PE_LOCK_OPEN, PE_CHART_STATS,
-    PE_MEGAPHONE, PE_CROSS
+    PE_MEGAPHONE, PE_CROSS, PE_PAPERCLIP, PE_SEND_UP, PE_STAR, PE_BAN, PE_WARNING
 )
 
 
@@ -42,12 +42,23 @@ class MenuCallback(CallbackData, prefix="menu"):
 
 
 class AdminCallback(CallbackData, prefix="adm"):
-    action: str  # "toggle_maint", "stats", "refresh_cache", "broadcast", "confirm_bc", "cancel_bc", "close", "panel"
+    action: str  # "toggle_maint", "stats", "refresh_cache", "broadcast", "close", "panel", "bc_stats"
+
+
+class BroadcastCallback(CallbackData, prefix="bc"):
+    action: str  # "time_menu", "set_time", "toggle_pin", "confirm_send", "cancel", "back_setup"
+    val: str = ""
+
+
+class StatAdminCallback(CallbackData, prefix="sta"):
+    action: str  # "menu", "bot_stats", "broadcast_list", "broadcast_detail", "broadcast_cancel", "close"
+    bc_id: int = 0
+    page: int = 0
 
 
 # ---------- Reply-клавиатура (только премиум-иконки, чистый текст без дефолт-эмодзи) ----------
 
-def get_main_keyboard() -> ReplyKeyboardMarkup:
+def get_main_keyboard(is_admin_user: bool = False) -> ReplyKeyboardMarkup:
     """Главная reply-клавиатура: текст без дефолтных эмодзи, только премиум-иконки слева."""
     kb = [
         [
@@ -59,6 +70,11 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
             KeyboardButton(text="Моя группа", icon_custom_emoji_id=PE_PEOPLE)
         ]
     ]
+    if is_admin_user:
+        kb.append([
+            KeyboardButton(text="Панель администратора", icon_custom_emoji_id=PE_SETTINGS),
+            KeyboardButton(text="Статистика", icon_custom_emoji_id=PE_CHART_STATS)
+        ])
     return ReplyKeyboardMarkup(
         keyboard=kb,
         resize_keyboard=True,
@@ -117,6 +133,11 @@ def get_main_menu_inline(is_admin_user: bool = False) -> InlineKeyboardMarkup:
                 text="Панель администратора",
                 icon_custom_emoji_id=PE_SETTINGS,
                 callback_data=MenuCallback(action="admin").pack()
+            ),
+            InlineKeyboardButton(
+                text="Статистика и рассылки",
+                icon_custom_emoji_id=PE_CHART_STATS,
+                callback_data=StatAdminCallback(action="menu").pack()
             )
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -492,20 +513,25 @@ def get_admin_keyboard(is_maintenance: bool) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(
-                text="Статистика",
+                text="Статистика бота",
                 icon_custom_emoji_id=PE_CHART_STATS,
                 callback_data=AdminCallback(action="stats").pack()
             ),
             InlineKeyboardButton(
-                text="Сбросить кэш сайта",
-                icon_custom_emoji_id=PE_REPEAT,
-                callback_data=AdminCallback(action="refresh_cache").pack()
+                text="Статистика рассылок",
+                icon_custom_emoji_id=PE_MEGAPHONE,
+                callback_data=AdminCallback(action="bc_stats").pack()
             )
         ],
         [
             InlineKeyboardButton(
-                text="Рассылка пользователям",
-                icon_custom_emoji_id=PE_MEGAPHONE,
+                text="Сбросить кэш сайта",
+                icon_custom_emoji_id=PE_REPEAT,
+                callback_data=AdminCallback(action="refresh_cache").pack()
+            ),
+            InlineKeyboardButton(
+                text="Новая рассылка",
+                icon_custom_emoji_id=PE_SEND_UP,
                 callback_data=AdminCallback(action="broadcast").pack()
             )
         ],
@@ -533,19 +559,323 @@ def get_admin_back_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def get_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура подтверждения рассылки."""
-    return InlineKeyboardMarkup(inline_keyboard=[
+# ---------- Клавиатуры настройки рассылки ----------
+
+def get_broadcast_setup_keyboard(
+    pin_enabled: bool,
+    is_scheduled: bool,
+    scheduled_label: str,
+    is_daily: bool = False
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура настройки параметров рассылки:
+    - Выбор времени (Сразу / запланировано / ежедневно)
+    - Закрепление (Да / Нет)
+    - Подтверждение
+    - Отмена
+    """
+    pin_text = "Закрепить сообщение: ДА" if pin_enabled else "Закрепить сообщение: НЕТ"
+    pin_icon = PE_CHECK if pin_enabled else PE_CROSS
+
+    if is_daily:
+        send_text = "Запустить ежедневную рассылку"
+        send_icon = PE_REPEAT
+    else:
+        send_text = "Запланировать рассылку" if is_scheduled else "Отправить сейчас"
+        send_icon = PE_CLOCK if is_scheduled else PE_SEND_UP
+
+    kb = [
         [
             InlineKeyboardButton(
-                text="Отправить всем",
-                icon_custom_emoji_id=PE_CHECK,
-                callback_data=AdminCallback(action="confirm_bc").pack()
-            ),
+                text=f"Время: {scheduled_label}",
+                icon_custom_emoji_id=PE_CLOCK,
+                callback_data=BroadcastCallback(action="time_menu").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=pin_text,
+                icon_custom_emoji_id=pin_icon,
+                callback_data=BroadcastCallback(action="toggle_pin").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=send_text,
+                icon_custom_emoji_id=send_icon,
+                callback_data=BroadcastCallback(action="confirm_send").pack()
+            )
+        ],
+        [
             InlineKeyboardButton(
                 text="Отмена",
                 icon_custom_emoji_id=PE_CROSS,
-                callback_data=AdminCallback(action="cancel_bc").pack()
+                callback_data=BroadcastCallback(action="cancel").pack()
+            )
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_broadcast_time_selection_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора времени отправки рассылки (пресеты, ежедневно и ручной ввод)."""
+    kb = [
+        [
+            InlineKeyboardButton(
+                text="Отправить сразу",
+                icon_custom_emoji_id=PE_SEND_UP,
+                callback_data=BroadcastCallback(action="set_time", val="now").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Каждый день в 07:00",
+                icon_custom_emoji_id=PE_REPEAT,
+                callback_data=BroadcastCallback(action="set_time", val="daily_7am").pack()
+            ),
+            InlineKeyboardButton(
+                text="Каждый день в своё время",
+                icon_custom_emoji_id=PE_CLOCK,
+                callback_data=BroadcastCallback(action="set_time", val="daily_custom").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Через 15 минут",
+                icon_custom_emoji_id=PE_CLOCK,
+                callback_data=BroadcastCallback(action="set_time", val="15m").pack()
+            ),
+            InlineKeyboardButton(
+                text="Через 1 час",
+                icon_custom_emoji_id=PE_CLOCK,
+                callback_data=BroadcastCallback(action="set_time", val="1h").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Через 3 часа",
+                icon_custom_emoji_id=PE_CLOCK,
+                callback_data=BroadcastCallback(action="set_time", val="3h").pack()
+            ),
+            InlineKeyboardButton(
+                text="Завтра в 09:00",
+                icon_custom_emoji_id=PE_CALENDAR,
+                callback_data=BroadcastCallback(action="set_time", val="tomorrow_9am").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Ввести дату и время вручную",
+                icon_custom_emoji_id=PE_SEARCH,
+                callback_data=BroadcastCallback(action="set_time", val="custom").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Назад к параметрам",
+                icon_custom_emoji_id=PE_ARROW_LEFT,
+                callback_data=BroadcastCallback(action="back_setup").pack()
+            )
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_broadcast_custom_time_back_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура отмены ручного ввода времени."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Отмена ввода времени",
+                icon_custom_emoji_id=PE_ARROW_LEFT,
+                callback_data=BroadcastCallback(action="back_setup").pack()
             )
         ]
     ])
+
+
+# ---------- Клавиатуры отдельной панели статистики (/statadmin) ----------
+
+def get_stat_admin_menu_keyboard(is_full_admin: bool = False) -> InlineKeyboardMarkup:
+    """Главное меню отдельной панели статистики."""
+    kb = [
+        [
+            InlineKeyboardButton(
+                text="Статистика аудитории бота",
+                icon_custom_emoji_id=PE_CHART_STATS,
+                callback_data=StatAdminCallback(action="bot_stats").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="История и статистика рассылок",
+                icon_custom_emoji_id=PE_MEGAPHONE,
+                callback_data=StatAdminCallback(action="broadcast_list", page=0).pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Обновить показатели",
+                icon_custom_emoji_id=PE_REPEAT,
+                callback_data=StatAdminCallback(action="menu").pack()
+            )
+        ]
+    ]
+    if is_full_admin:
+        kb.append([
+            InlineKeyboardButton(
+                text="Панель администратора (/admin)",
+                icon_custom_emoji_id=PE_SETTINGS,
+                callback_data=AdminCallback(action="panel").pack()
+            )
+        ])
+    kb.append([
+        InlineKeyboardButton(
+            text="Закрыть панель",
+            icon_custom_emoji_id=PE_CROSS,
+            callback_data=StatAdminCallback(action="close").pack()
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_stat_admin_bot_stats_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура под экраном общей статистики бота."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Обновить",
+                icon_custom_emoji_id=PE_REPEAT,
+                callback_data=StatAdminCallback(action="bot_stats").pack()
+            ),
+            InlineKeyboardButton(
+                text="К рассылкам",
+                icon_custom_emoji_id=PE_MEGAPHONE,
+                callback_data=StatAdminCallback(action="broadcast_list", page=0).pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Назад в меню аналитики",
+                icon_custom_emoji_id=PE_ARROW_LEFT,
+                callback_data=StatAdminCallback(action="menu").pack()
+            )
+        ]
+    ])
+
+
+def get_broadcast_list_keyboard(
+    broadcasts: List[Dict[str, Any]],
+    page: int,
+    total_pages: int
+) -> InlineKeyboardMarkup:
+    """Клавиатура со списком рассылок и пагинацией."""
+    kb: List[List[InlineKeyboardButton]] = []
+
+    # Кнопки для каждой рассылки
+    for bc in broadcasts:
+        bc_id = bc["id"]
+        status = bc.get("status", "")
+        # Иконка статуса
+        is_daily = (bc.get("repeat_type") == "daily")
+        rep_time = bc.get("repeat_time") or "07:00"
+        if status == "completed":
+            status_text = f"Завершена ({bc.get('sent_count', 0)})"
+            icon = PE_CHECK
+        elif status == "scheduled":
+            if is_daily:
+                status_text = f"Ежедневно в {rep_time}"
+                icon = PE_REPEAT
+            else:
+                sch = bc.get("scheduled_at") or ""
+                sch_short = sch[5:16] if len(sch) >= 16 else sch
+                status_text = f"План: {sch_short}"
+                icon = PE_CLOCK
+        elif status == "in_progress":
+            status_text = "Отправляется..."
+            icon = PE_REPEAT
+        elif status == "cancelled":
+            status_text = "Отменена"
+            icon = PE_CROSS
+        else:
+            status_text = status
+            icon = PE_INFO
+
+        kb.append([
+            InlineKeyboardButton(
+                text=f"Рассылка #{bc_id} • {status_text}",
+                icon_custom_emoji_id=icon,
+                callback_data=StatAdminCallback(action="broadcast_detail", bc_id=bc_id, page=page).pack()
+            )
+        ])
+
+    # Пагинация
+    nav_row: List[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(
+            InlineKeyboardButton(
+                text=f"Стр. {page}",
+                icon_custom_emoji_id=PE_ARROW_LEFT,
+                callback_data=StatAdminCallback(action="broadcast_list", page=page - 1).pack()
+            )
+        )
+    if page < total_pages - 1:
+        nav_row.append(
+            InlineKeyboardButton(
+                text=f"Стр. {page + 2}",
+                icon_custom_emoji_id=PE_ARROW_RIGHT,
+                callback_data=StatAdminCallback(action="broadcast_list", page=page + 1).pack()
+            )
+        )
+    if nav_row:
+        kb.append(nav_row)
+
+    # Управление
+    kb.append([
+        InlineKeyboardButton(
+            text="Обновить список",
+            icon_custom_emoji_id=PE_REPEAT,
+            callback_data=StatAdminCallback(action="broadcast_list", page=page).pack()
+        ),
+        InlineKeyboardButton(
+            text="В меню аналитики",
+            icon_custom_emoji_id=PE_HOUSE,
+            callback_data=StatAdminCallback(action="menu").pack()
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_broadcast_detail_keyboard(
+    bc_id: int,
+    is_scheduled: bool,
+    page: int = 0
+) -> InlineKeyboardMarkup:
+    """Клавиатура детального просмотра рассылки."""
+    kb: List[List[InlineKeyboardButton]] = []
+
+    if is_scheduled:
+        kb.append([
+            InlineKeyboardButton(
+                text="Отменить запланированную рассылку",
+                icon_custom_emoji_id=PE_CROSS,
+                callback_data=StatAdminCallback(action="broadcast_cancel", bc_id=bc_id, page=page).pack()
+            )
+        ])
+
+    kb.append([
+        InlineKeyboardButton(
+            text="К списку рассылок",
+            icon_custom_emoji_id=PE_ARROW_LEFT,
+            callback_data=StatAdminCallback(action="broadcast_list", page=page).pack()
+        ),
+        InlineKeyboardButton(
+            text="В меню аналитики",
+            icon_custom_emoji_id=PE_HOUSE,
+            callback_data=StatAdminCallback(action="menu").pack()
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+

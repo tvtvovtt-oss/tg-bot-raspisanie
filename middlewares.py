@@ -2,7 +2,7 @@ from typing import Callable, Dict, Any, Awaitable
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Message, CallbackQuery
 
-from database import is_maintenance_mode, is_admin
+from database import is_maintenance_mode, is_admin, is_stat_admin
 from premium_emoji import te, PE_SETTINGS
 
 
@@ -10,7 +10,7 @@ class MaintenanceMiddleware(BaseMiddleware):
     """
     Перехватывает все входящие сообщения и callback-запросы.
     Если включен технический перерыв:
-    - Администраторы имеют полный доступ без ограничений.
+    - Администраторы и аналитики имеют полный доступ.
     - Обычные пользователи получают уведомление о тех. перерыве и их запрос не обрабатывается.
     """
     async def __call__(
@@ -29,8 +29,8 @@ class MaintenanceMiddleware(BaseMiddleware):
         if not user:
             return await handler(event, data)
 
-        # Администраторы имеют беспрепятственный доступ
-        if await is_admin(user.id):
+        # Администраторы и аналитики имеют беспрепятственный доступ
+        if await is_admin(user.id) or await is_stat_admin(user.id):
             return await handler(event, data)
 
         # Обычные пользователи блокируются с уведомлением

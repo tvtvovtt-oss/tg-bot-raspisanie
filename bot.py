@@ -13,6 +13,7 @@ from database import init_db
 from handlers import router
 from parser import get_groups, get_available_dates
 from notifier import schedule_notification_worker
+from broadcast_service import broadcast_scheduler_worker
 from middlewares import MaintenanceMiddleware
 
 # Configure logging
@@ -82,12 +83,18 @@ async def main():
     else:
         logger.info("Фоновые уведомления о новом расписании отключены (ENABLE_NOTIFICATIONS=false).")
 
+    # Start background broadcast scheduler worker
+    broadcast_task = asyncio.create_task(broadcast_scheduler_worker(bot))
+    logger.info("Фоновый планировщик отложенных рассылок запущен.")
+
     logger.info("Бот успешно запущен и готов к работе!")
     try:
         await dp.start_polling(bot)
     finally:
         if notifier_task:
             notifier_task.cancel()
+        if broadcast_task:
+            broadcast_task.cancel()
         await bot.session.close()
         logger.info("Бот остановлен.")
 

@@ -1,7 +1,8 @@
 import asyncio
 from datetime import datetime, timedelta
 import html
-from typing import Optional
+import re
+from typing import Optional, Dict, Any, Tuple
 
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
@@ -12,8 +13,10 @@ from aiogram.fsm.state import State, StatesGroup
 
 from database import (
     get_user, ensure_user, set_user_group, set_user_teacher, toggle_user_notifications,
-    is_admin, is_maintenance_mode, set_maintenance_mode, get_bot_stats, get_all_user_ids
+    is_admin, is_stat_admin, is_maintenance_mode, set_maintenance_mode, get_bot_stats, get_all_user_ids,
+    create_broadcast, get_broadcast, get_broadcasts, get_broadcasts_count, cancel_broadcast, get_broadcasts_summary
 )
+from broadcast_service import execute_broadcast
 from parser import (
     get_available_dates,
     get_groups,
@@ -49,12 +52,20 @@ from keyboards import (
     get_my_group_keyboard,
     get_admin_keyboard,
     get_admin_back_keyboard,
-    get_broadcast_confirm_keyboard,
+    get_broadcast_setup_keyboard,
+    get_broadcast_time_selection_keyboard,
+    get_broadcast_custom_time_back_keyboard,
+    get_stat_admin_menu_keyboard,
+    get_stat_admin_bot_stats_keyboard,
+    get_broadcast_list_keyboard,
+    get_broadcast_detail_keyboard,
     DateCallback,
     GroupCallback,
     TeacherCallback,
     MenuCallback,
-    AdminCallback
+    AdminCallback,
+    BroadcastCallback,
+    StatAdminCallback
 )
 import logging
 logger = logging.getLogger(__name__)
@@ -63,7 +74,8 @@ from premium_emoji import (
     te, strip_tg_emoji, PE_BOT, PE_CALENDAR, PE_BELL, PE_SEARCH, PE_PEOPLE, PE_INFO, PE_CHECK,
     PE_CLOCK, PE_HOUSE, PE_PERSON_CHECK, PE_TIME_PASSED, PE_STAR, PE_WARNING,
     PE_WRITE, PE_LINK, PE_REPEAT, PE_ARROW_LEFT, PE_CROSS,
-    PE_SETTINGS, PE_LOCK_CLOSED, PE_LOCK_OPEN, PE_CHART_STATS, PE_MEGAPHONE, PE_BAN
+    PE_SETTINGS, PE_LOCK_CLOSED, PE_LOCK_OPEN, PE_CHART_STATS, PE_MEGAPHONE, PE_BAN,
+    PE_PAPERCLIP, PE_SEND_UP
 )
 
 router = Router()
@@ -72,7 +84,9 @@ router = Router()
 class BotStates(StatesGroup):
     waiting_for_group_search = State()
     waiting_for_teacher_search = State()
-    waiting_for_broadcast = State()
+    waiting_for_broadcast_text = State()
+    waiting_for_broadcast_custom_time = State()
+    waiting_for_broadcast_daily_time = State()
 
 
 async def safe_query_answer(query: CallbackQuery, text: Optional[str] = None, show_alert: bool = False):
@@ -195,13 +209,14 @@ async def cmd_start(message: Message, state: FSMContext):
     await safe_answer(
         message,
         build_welcome_text(user, first_name),
-        reply_markup=get_main_keyboard()
+        reply_markup=get_main_keyboard(is_admin_user=is_adm)
     )
     await safe_answer(message, get_menu_text(user), reply_markup=get_main_menu_inline(is_admin_user=is_adm))
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
+    is_adm = await is_admin(message.from_user.id)
     text = (
         f"{te(PE_INFO)} <b>Как пользоваться ботом:</b>\n\n"
         f"• {te(PE_CALENDAR)} <b>На сегодня / На завтра</b> — расписание твоей группы\n"
@@ -210,10 +225,22 @@ async def cmd_help(message: Message):
         f"{te(PE_SEARCH)} <b>Быстрый поиск группы:</b> просто отправь в чат её номер или первые буквы (например: <code>ИС</code>, <code>253</code> или <code>АВ-261</code>)!\n\n"
         f"{te(PE_STAR)} <i>Подсказка: ты можешь нажать /start один раз и дальше переключаться кнопками меню!</i>"
     )
-    await safe_answer(message, text, reply_markup=get_main_keyboard())
+    await safe_answer(message, text, reply_markup=get_main_keyboard(is_admin_user=is_adm))
 
 
 # ---------- Обработчики текстовых кнопок Reply-клавиатуры ----------
+
+@router.message(F.text.in_({"Панель администратора", "Админ-панель", "Админка", "⚙️ Панель администратора"}))
+async def handle_reply_admin_button(message: Message, state: FSMContext):
+    """Открытие админ-панели по нажатию reply-кнопки."""
+    await cmd_admin(message, state)
+
+
+@router.message(F.text.in_({"Статистика", "Статистика бота", "Статистика и рассылки", "📊 Статистика", "Аналитика"}))
+async def handle_reply_stats_button(message: Message, state: FSMContext):
+    """Открытие панели статистики по нажатию reply-кнопки."""
+    await cmd_statadmin(message, state)
+
 
 @router.message(F.text.in_({"Звонки", "🔔 Звонки"}))
 @router.message(Command("calls"))
@@ -796,7 +823,9 @@ async def render_admin_panel_text() -> str:
         f"{te(PE_PEOPLE)} <b>Пользователей в базе:</b> <code>{stats['total']}</code>\n"
         f"{te(PE_BELL)} <b>С уведомлениями:</b> <code>{stats['with_notif']}</code>\n"
         f"{te(PE_SEARCH)} <b>Выбрали группу:</b> <code>{stats['with_group']}</code>\n"
-        f"{te(PE_PERSON_CHECK)} <b>Выбрали преподавателя:</b> <code>{stats['with_teacher']}</code>"
+        f"{te(PE_PERSON_CHECK)} <b>Выбрали преподавателя:</b> <code>{stats['with_teacher']}</code>\n\n"
+        f"{te(PE_MEGAPHONE)} <b>Рассылок проведено:</b> <code>{stats['total_broadcasts']}</code> (доставлено: <code>{stats['total_sent_broadcast_messages']}</code>)\n"
+        f"{te(PE_CLOCK)} <b>Запланировано рассылок:</b> <code>{stats['scheduled_broadcasts']}</code>"
     )
 
 
@@ -842,17 +871,14 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
         await safe_edit_text(query.message, panel_text, reply_markup=get_admin_keyboard(new_maint))
 
     elif action == "stats":
-        stats = await get_bot_stats()
-        top_groups_str = "\n".join([f"  • <b>{html.escape(g)}</b>: {cnt} чел." for g, cnt in stats["top_groups"]]) or "  <i>Нет данных</i>"
-        text = (
-            f"{te(PE_CHART_STATS)} <b>Детальная статистика бота:</b>\n\n"
-            f"{te(PE_PEOPLE)} Всего пользователей: <b>{stats['total']}</b>\n"
-            f"{te(PE_BELL)} С включенными уведомлениями: <b>{stats['with_notif']}</b>\n"
-            f"{te(PE_SEARCH)} С выбранной группой: <b>{stats['with_group']}</b>\n"
-            f"{te(PE_PERSON_CHECK)} С выбранным преподавателем: <b>{stats['with_teacher']}</b>\n\n"
-            f"{te(PE_STAR)} <b>Топ-5 групп:</b>\n{top_groups_str}"
-        )
-        await safe_edit_text(query.message, text, reply_markup=get_admin_back_keyboard())
+        text = await render_stat_admin_bot_stats_text()
+        await safe_edit_text(query.message, text, reply_markup=get_stat_admin_bot_stats_keyboard())
+        await safe_query_answer(query)
+
+    elif action == "bc_stats":
+        text, total_pages, broadcasts = await render_broadcast_list_text(page=0)
+        kb = get_broadcast_list_keyboard(broadcasts, page=0, total_pages=total_pages)
+        await safe_edit_text(query.message, text, reply_markup=kb)
         await safe_query_answer(query)
 
     elif action == "refresh_cache":
@@ -871,64 +897,108 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
             pass
 
     elif action == "broadcast":
-        await state.set_state(BotStates.waiting_for_broadcast)
+        await state.set_state(BotStates.waiting_for_broadcast_text)
         text = (
-            f"{te(PE_MEGAPHONE)} <b>Рассылка сообщений пользователям</b>\n\n"
-            "Отправьте текст сообщения для рассылки всем пользователям бота.\n\n"
+            f"{te(PE_MEGAPHONE)} <b>Создание новой рассылки</b>\n\n"
+            "Отправьте текст сообщения для рассылки всем пользователям бота.\n"
+            "<i>Поддерживается HTML-форматирование и премиум-эмодзи.</i>\n\n"
+            "На следующем шаге вы сможете задать <b>точное время отправки</b> и выбрать, "
+            "<b>закреплять ли сообщение</b> в чатах пользователей.\n\n"
             "<i>Для отмены напишите <code>отмена</code> или нажмите кнопку ниже:</i>"
         )
         await safe_edit_text(query.message, text, reply_markup=get_admin_back_keyboard())
         await safe_query_answer(query)
 
-    elif action == "confirm_bc":
-        data = await state.get_data()
-        bc_text = data.get("broadcast_text")
-        await state.clear()
-        if not bc_text:
-            await safe_query_answer(query, "Текст рассылки не найден.", show_alert=True)
-            return
 
-        user_ids = await get_all_user_ids()
-        await safe_edit_text(query.message, f"{te(PE_CLOCK)} Начинаю рассылку для {len(user_ids)} пользователей...")
-        sent, blocked, failed = 0, 0, 0
-        for uid in user_ids:
-            try:
-                await query.bot.send_message(uid, bc_text, parse_mode="HTML")
-                sent += 1
-            except TelegramBadRequest:
-                try:
-                    await query.bot.send_message(uid, strip_tg_emoji(bc_text), parse_mode="HTML")
-                    sent += 1
-                except Exception:
-                    failed += 1
-            except Exception as e:
-                err = str(e).lower()
-                if "forbidden" in err or "blocked" in err:
-                    blocked += 1
-                else:
-                    failed += 1
-            await asyncio.sleep(0.05)  # Telegram API rate-limit protection
+# ---------- Логика создания и настройки рассылки ----------
 
-        res_text = (
-            f"{te(PE_MEGAPHONE)} <b>Рассылка успешно завершена!</b>\n\n"
-            f"{te(PE_CHECK)} Доставлено: <b>{sent}</b>\n"
-            f"{te(PE_BAN)} Заблокировали бота: <b>{blocked}</b>\n"
-            f"{te(PE_WARNING)} Ошибок отправки: <b>{failed}</b>\n"
-            f"{te(PE_PEOPLE)} Всего пользователей: <b>{len(user_ids)}</b>"
-        )
-        await safe_edit_text(query.message, res_text, reply_markup=get_admin_back_keyboard())
+def parse_custom_scheduled_time(input_str: str) -> Tuple[Optional[datetime], Optional[str]]:
+    """
+    Разбирает пользовательскую строку даты/времени для запланированной рассылки.
+    Поддерживает:
+    - ЧЧ:ММ (напр. 18:30)
+    - ДД.ММ ЧЧ:ММ (напр. 12.09 10:00)
+    - ДД.ММ.ГГГГ ЧЧ:ММ (напр. 12.09.2026 10:00)
+    """
+    raw = input_str.strip()
+    now = datetime.now()
 
-    elif action == "cancel_bc":
-        await state.clear()
-        panel_text = await render_admin_panel_text()
-        is_maint = await is_maintenance_mode()
-        await safe_edit_text(query.message, panel_text, reply_markup=get_admin_keyboard(is_maint))
-        await safe_query_answer(query, "Рассылка отменена.")
+    # 1. Формат ЧЧ:ММ
+    time_match = re.match(r"^(\d{1,2})[:.-](\d{2})$", raw)
+    if time_match:
+        h, m = int(time_match.group(1)), int(time_match.group(2))
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            target_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if target_dt <= now:
+                # Если время сегодня уже прошло, переносим на завтра
+                target_dt += timedelta(days=1)
+            return target_dt, None
+        return None, "Некорректное время. Часы: 0-23, минуты: 0-59."
+
+    # 2. Формат ДД.ММ ЧЧ:ММ
+    dt_match1 = re.match(r"^(\d{1,2})[.-](\d{1,2})\s+(\d{1,2})[:.-](\d{2})$", raw)
+    if dt_match1:
+        d, mon, h, m = int(dt_match1.group(1)), int(dt_match1.group(2)), int(dt_match1.group(3)), int(dt_match1.group(4))
+        try:
+            target_dt = datetime(year=now.year, month=mon, day=d, hour=h, minute=m, second=0)
+            if target_dt <= now:
+                target_dt = datetime(year=now.year + 1, month=mon, day=d, hour=h, minute=m, second=0)
+            return target_dt, None
+        except ValueError:
+            return None, "Некорректная дата или время."
+
+    # 3. Формат ДД.ММ.ГГГГ ЧЧ:ММ
+    dt_match2 = re.match(r"^(\d{1,2})[.-](\d{1,2})[.-](\d{4})\s+(\d{1,2})[:.-](\d{2})$", raw)
+    if dt_match2:
+        d, mon, y, h, m = int(dt_match2.group(1)), int(dt_match2.group(2)), int(dt_match2.group(3)), int(dt_match2.group(4)), int(dt_match2.group(5))
+        try:
+            target_dt = datetime(year=y, month=mon, day=d, hour=h, minute=m, second=0)
+            if target_dt <= now:
+                return None, "Указанное время уже прошло. Введите дату и время в будущем."
+            return target_dt, None
+        except ValueError:
+            return None, "Некорректная дата или время."
+
+    return None, "Не удалось распознать формат. Используйте <code>ЧЧ:ММ</code> (напр. <code>18:30</code>) или <code>ДД.ММ ЧЧ:ММ</code> (напр. <code>12.09 10:00</code>)."
 
 
-@router.message(BotStates.waiting_for_broadcast)
-async def handle_broadcast_input(message: Message, state: FSMContext):
-    """Прием текста сообщения для массовой рассылки администратором."""
+def render_broadcast_setup_text(
+    broadcast_text: str,
+    pin_message: bool,
+    scheduled_at_str: Optional[str],
+    total_users: int,
+    repeat_type: str = "once",
+    repeat_time: Optional[str] = None
+) -> str:
+    """Формирует предпросмотр и параметры создаваемой рассылки."""
+    pin_label = (
+        f"{te(PE_CHECK)} <b>Да</b> (сообщение закрепится в чате)"
+        if pin_message else
+        f"{te(PE_CROSS)} <b>Нет</b> (обычное сообщение)"
+    )
+    if repeat_type == "daily":
+        time_label = f"{te(PE_REPEAT)} <b>Каждый день в {repeat_time or '07:00'}</b> (след. отправка: <code>{scheduled_at_str}</code>)"
+    elif scheduled_at_str:
+        time_label = f"{te(PE_CLOCK)} <b>Запланировано на:</b> <code>{scheduled_at_str}</code>"
+    else:
+        time_label = f"{te(PE_SEND_UP)} <b>Сразу после подтверждения</b>"
+
+    return (
+        f"{te(PE_MEGAPHONE)} <b>Параметры рассылки:</b>\n\n"
+        f"<b>Предпросмотр сообщения:</b>\n"
+        f"────────────────────\n"
+        f"{broadcast_text}\n"
+        f"────────────────────\n\n"
+        f"{te(PE_CLOCK)} <b>Время отправки:</b> {time_label}\n"
+        f"{te(PE_PAPERCLIP)} <b>Закрепление:</b> {pin_label}\n"
+        f"{te(PE_PEOPLE)} <b>Получателей:</b> <code>~{total_users}</code> чел.\n\n"
+        f"<i>Настройте параметры кнопками ниже и подтвердите отправку:</i>"
+    )
+
+
+@router.message(BotStates.waiting_for_broadcast_text)
+async def handle_broadcast_text_input(message: Message, state: FSMContext):
+    """Прием текста сообщения для рассылки администратором."""
     if not await is_admin(message.from_user.id):
         await state.clear()
         return
@@ -938,19 +1008,540 @@ async def handle_broadcast_input(message: Message, state: FSMContext):
         await state.clear()
         panel_text = await render_admin_panel_text()
         is_maint = await is_maintenance_mode()
-        await safe_answer(message, f"{te(PE_CROSS)} Рассылка отменена.")
+        await safe_answer(message, f"{te(PE_CROSS)} Создание рассылки отменено.")
         await safe_answer(message, panel_text, reply_markup=get_admin_keyboard(is_maint))
         return
 
-    # Сохраняем HTML-разметку сообщения для рассылки
     formatted_text = message.html_text if hasattr(message, "html_text") else html.escape(text)
-    await state.update_data(broadcast_text=formatted_text)
+    user_ids = await get_all_user_ids()
+    total_users = len(user_ids)
 
-    preview_text = (
-        f"{te(PE_MEGAPHONE)} <b>Предпросмотр сообщения для рассылки:</b>\n"
-        f"────────────────────\n"
-        f"{formatted_text}\n"
-        f"────────────────────\n\n"
-        f"Подтверждаешь отправку всем пользователям бота?"
+    # Сохраняем в FSM данные по умолчанию (время: Сразу, закрепление: Нет)
+    await state.update_data(
+        broadcast_text=formatted_text,
+        pin_message=False,
+        scheduled_at=None,
+        repeat_type="once",
+        repeat_time=None,
+        total_users=total_users
     )
-    await safe_answer(message, preview_text, reply_markup=get_broadcast_confirm_keyboard())
+
+    setup_text = render_broadcast_setup_text(
+        broadcast_text=formatted_text,
+        pin_message=False,
+        scheduled_at_str=None,
+        total_users=total_users,
+        repeat_type="once",
+        repeat_time=None
+    )
+    kb = get_broadcast_setup_keyboard(
+        pin_enabled=False,
+        is_scheduled=False,
+        scheduled_label="Сразу",
+        is_daily=False
+    )
+    await safe_answer(message, setup_text, reply_markup=kb)
+
+
+@router.callback_query(BroadcastCallback.filter())
+async def cb_broadcast_handler(query: CallbackQuery, callback_data: BroadcastCallback, state: FSMContext):
+    """Обработчик настройки параметров и отправки рассылки."""
+    if not await is_admin(query.from_user.id):
+        await safe_query_answer(query, "Доступ запрещен.", show_alert=True)
+        return
+
+    action = callback_data.action
+    data = await state.get_data()
+    bc_text = data.get("broadcast_text")
+
+    if action == "cancel":
+        await state.clear()
+        panel_text = await render_admin_panel_text()
+        is_maint = await is_maintenance_mode()
+        await safe_edit_text(query.message, panel_text, reply_markup=get_admin_keyboard(is_maint))
+        await safe_query_answer(query, "Создание рассылки отменено.")
+        return
+
+    if not bc_text:
+        await safe_query_answer(query, "Данные рассылки устарели. Начните создание заново.", show_alert=True)
+        return
+
+    pin_message = data.get("pin_message", False)
+    scheduled_at = data.get("scheduled_at")
+    repeat_type = data.get("repeat_type", "once")
+    repeat_time = data.get("repeat_time")
+    is_daily = (repeat_type == "daily")
+    total_users = data.get("total_users") or len(await get_all_user_ids())
+
+    if action == "toggle_pin":
+        pin_message = not pin_message
+        await state.update_data(pin_message=pin_message)
+        if is_daily:
+            sch_label = f"Ежедневно в {repeat_time or '07:00'}"
+        else:
+            sch_label = scheduled_at if scheduled_at else "Сразу"
+        setup_text = render_broadcast_setup_text(bc_text, pin_message, scheduled_at, total_users, repeat_type, repeat_time)
+        kb = get_broadcast_setup_keyboard(pin_message, bool(scheduled_at), sch_label, is_daily=is_daily)
+        await safe_edit_text(query.message, setup_text, reply_markup=kb)
+        await safe_query_answer(query, "Закрепление ВКЛЮЧЕНО" if pin_message else "Закрепление ВЫКЛЮЧЕНО")
+
+    elif action == "time_menu":
+        text = (
+            f"{te(PE_CLOCK)} <b>Выбор времени отправки рассылки</b>\n\n"
+            "Выберите быстрый пресет, настройте <b>ежедневную рассылку</b> (например, каждое утро в 07:00) "
+            "или введите дату и точное время вручную:\n\n"
+            f"Текущее время бота: <code>{datetime.now().strftime('%d.%m.%Y %H:%M')}</code>"
+        )
+        await safe_edit_text(query.message, text, reply_markup=get_broadcast_time_selection_keyboard())
+        await safe_query_answer(query)
+
+    elif action == "back_setup":
+        await state.set_state(BotStates.waiting_for_broadcast_text)
+        if is_daily:
+            sch_label = f"Ежедневно в {repeat_time or '07:00'}"
+        else:
+            sch_label = scheduled_at if scheduled_at else "Сразу"
+        setup_text = render_broadcast_setup_text(bc_text, pin_message, scheduled_at, total_users, repeat_type, repeat_time)
+        kb = get_broadcast_setup_keyboard(pin_message, bool(scheduled_at), sch_label, is_daily=is_daily)
+        await safe_edit_text(query.message, setup_text, reply_markup=kb)
+        await safe_query_answer(query)
+
+    elif action == "set_time":
+        val = callback_data.val
+        now = datetime.now()
+        new_scheduled_at = None
+        new_repeat_type = "once"
+        new_repeat_time = None
+
+        if val == "now":
+            new_scheduled_at = None
+        elif val == "daily_7am":
+            new_repeat_type = "daily"
+            new_repeat_time = "07:00"
+            today_7am = now.replace(hour=7, minute=0, second=0, microsecond=0)
+            first_dt = today_7am if now < today_7am else (today_7am + timedelta(days=1))
+            new_scheduled_at = first_dt.strftime("%Y-%m-%d %H:%M:00")
+        elif val == "daily_custom":
+            await state.set_state(BotStates.waiting_for_broadcast_daily_time)
+            text = (
+                f"{te(PE_CLOCK)} <b>Настройка ежедневной рассылки</b>\n\n"
+                "Отправьте время в формате <code>ЧЧ:ММ</code>, в которое бот должен <b>каждый день</b> отправлять эту рассылку всем пользователям.\n\n"
+                "<b>Примеры:</b>\n"
+                "• <code>07:00</code> — каждое утро в 7:00\n"
+                "• <code>14:30</code> — каждый день в 14:30\n"
+                "• <code>20:00</code> — каждый вечер в 20:00\n\n"
+                "<i>Для отмены нажмите кнопку ниже:</i>"
+            )
+            await safe_edit_text(query.message, text, reply_markup=get_broadcast_custom_time_back_keyboard())
+            await safe_query_answer(query)
+            return
+        elif val == "15m":
+            new_scheduled_at = (now + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:00")
+        elif val == "1h":
+            new_scheduled_at = (now + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:00")
+        elif val == "3h":
+            new_scheduled_at = (now + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:00")
+        elif val == "tomorrow_9am":
+            tomorrow = now + timedelta(days=1)
+            new_scheduled_at = tomorrow.strftime("%Y-%m-%d 09:00:00")
+        elif val == "custom":
+            await state.set_state(BotStates.waiting_for_broadcast_custom_time)
+            text = (
+                f"{te(PE_CLOCK)} <b>Ручной ввод времени рассылки</b>\n\n"
+                "Отправьте сообщение с желаемым временем отправки.\n\n"
+                "<b>Поддерживаемые форматы:</b>\n"
+                "• <code>18:30</code> — сегодня в 18:30 (или завтра, если время прошло)\n"
+                "• <code>12.09 10:00</code> — на указанный день и время\n"
+                "• <code>12.09.2026 10:00</code> — точная дата и время\n\n"
+                "<i>Для отмены нажмите кнопку ниже:</i>"
+            )
+            await safe_edit_text(query.message, text, reply_markup=get_broadcast_custom_time_back_keyboard())
+            await safe_query_answer(query)
+            return
+
+        await state.update_data(
+            scheduled_at=new_scheduled_at,
+            repeat_type=new_repeat_type,
+            repeat_time=new_repeat_time
+        )
+        scheduled_at = new_scheduled_at
+        repeat_type = new_repeat_type
+        repeat_time = new_repeat_time
+        is_daily = (repeat_type == "daily")
+
+        if is_daily:
+            sch_label = f"Ежедневно в {repeat_time}"
+        else:
+            sch_label = scheduled_at if scheduled_at else "Сразу"
+
+        setup_text = render_broadcast_setup_text(bc_text, pin_message, scheduled_at, total_users, repeat_type, repeat_time)
+        kb = get_broadcast_setup_keyboard(pin_message, bool(scheduled_at), sch_label, is_daily=is_daily)
+        await safe_edit_text(query.message, setup_text, reply_markup=kb)
+        await safe_query_answer(query, f"Время установлено: {sch_label}")
+
+    elif action == "confirm_send":
+        await state.clear()
+        bc_id = await create_broadcast(
+            created_by=query.from_user.id,
+            message_text=bc_text,
+            pin_message=pin_message,
+            scheduled_at=scheduled_at,
+            repeat_type=repeat_type,
+            repeat_time=repeat_time
+        )
+
+        pin_note = "Да (будет закреплено в чатах)" if pin_message else "Нет"
+        if is_daily:
+            success_msg = (
+                f"{te(PE_REPEAT)} <b>Ежедневная рассылка #{bc_id} успешно запущена!</b>\n\n"
+                f"{te(PE_CLOCK)} Время: <b>Каждый день в {repeat_time}</b>\n"
+                f"{te(PE_CALENDAR)} Первая отправка: <code>{scheduled_at}</code>\n"
+                f"{te(PE_PAPERCLIP)} Закрепление: <b>{pin_note}</b>\n"
+                f"{te(PE_PEOPLE)} Получателей: <b>{total_users}</b>\n\n"
+                f"<i>Бот будет отправлять рассылку каждый день точно в {repeat_time}. "
+                f"Вы можете отслеживать статистику или остановить рассылку кнопками в статистике.</i>"
+            )
+        elif not scheduled_at:
+            # Мгновенный запуск рассылки в фоне
+            asyncio.create_task(execute_broadcast(query.bot, bc_id))
+            pin_note_fast = "Сообщение будет закреплено в чатах пользователей." if pin_message else "Без закрепления."
+            success_msg = (
+                f"{te(PE_SEND_UP)} <b>Рассылка #{bc_id} запущена!</b>\n\n"
+                f"{te(PE_PEOPLE)} Получателей: <b>{total_users}</b>\n"
+                f"{te(PE_PAPERCLIP)} Закрепление: <b>{pin_note_fast}</b>\n\n"
+                f"<i>Бот выполняет рассылку в фоновом режиме. По завершении вы получите детальный отчёт.</i>"
+            )
+        else:
+            success_msg = (
+                f"{te(PE_CHECK)} <b>Рассылка #{bc_id} успешно запланирована!</b>\n\n"
+                f"{te(PE_CLOCK)} Время отправки: <code>{scheduled_at}</code>\n"
+                f"{te(PE_PAPERCLIP)} Закрепление: <b>{pin_note}</b>\n"
+                f"{te(PE_PEOPLE)} Примерно получателей: <b>{total_users}</b>\n\n"
+                f"<i>Рассылка будет автоматически отправлена ровно в указанное время. "
+                f"Вы можете отслеживать её статус или отменить в панели аналитики (/statadmin).</i>"
+            )
+
+        await safe_edit_text(query.message, success_msg, reply_markup=get_admin_back_keyboard())
+        await safe_query_answer(query)
+
+
+@router.message(BotStates.waiting_for_broadcast_daily_time)
+async def handle_broadcast_daily_time_input(message: Message, state: FSMContext):
+    """Прием времени ЧЧ:ММ для ежедневной рассылки."""
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if text.lower() in ("отмена", "/cancel", "отменить"):
+        await state.set_state(BotStates.waiting_for_broadcast_text)
+        data = await state.get_data()
+        bc_text = data.get("broadcast_text", "")
+        pin_message = data.get("pin_message", False)
+        scheduled_at = data.get("scheduled_at")
+        repeat_type = data.get("repeat_type", "once")
+        repeat_time = data.get("repeat_time")
+        total_users = data.get("total_users") or len(await get_all_user_ids())
+        sch_label = scheduled_at if scheduled_at else "Сразу"
+        setup_text = render_broadcast_setup_text(bc_text, pin_message, scheduled_at, total_users, repeat_type, repeat_time)
+        kb = get_broadcast_setup_keyboard(pin_message, bool(scheduled_at), sch_label, is_daily=(repeat_type == "daily"))
+        await safe_answer(message, setup_text, reply_markup=kb)
+        return
+
+    time_match = re.match(r"^(\d{1,2})[:.-](\d{2})$", text)
+    if not time_match:
+        await safe_answer(
+            message,
+            f"{te(PE_WARNING, '!')} Не удалось распознать время.\n"
+            "Пожалуйста, введите время в формате <code>ЧЧ:ММ</code> (например: <code>07:00</code> или <code>15:30</code>).\n"
+            "Или напишите <code>отмена</code>."
+        )
+        return
+
+    h, m = int(time_match.group(1)), int(time_match.group(2))
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        await safe_answer(message, f"{te(PE_WARNING, '!')} Некорректное время. Часы должны быть 0-23, минуты 0-59.")
+        return
+
+    rep_time_str = f"{h:02d}:{m:02d}"
+    now = datetime.now()
+    target_today = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    first_dt = target_today if now < target_today else (target_today + timedelta(days=1))
+    scheduled_at_str = first_dt.strftime("%Y-%m-%d %H:%M:00")
+
+    await state.update_data(scheduled_at=scheduled_at_str, repeat_type="daily", repeat_time=rep_time_str)
+    await state.set_state(BotStates.waiting_for_broadcast_text)
+
+    data = await state.get_data()
+    bc_text = data.get("broadcast_text", "")
+    pin_message = data.get("pin_message", False)
+    total_users = data.get("total_users") or len(await get_all_user_ids())
+
+    sch_label = f"Ежедневно в {rep_time_str}"
+    setup_text = render_broadcast_setup_text(bc_text, pin_message, scheduled_at_str, total_users, repeat_type="daily", repeat_time=rep_time_str)
+    kb = get_broadcast_setup_keyboard(pin_message, True, sch_label, is_daily=True)
+    await safe_answer(
+        message,
+        f"{te(PE_CHECK)} Время установлено: <b>Каждый день в {rep_time_str}</b> (первая отправка: <code>{scheduled_at_str}</code>)\n\n" + setup_text,
+        reply_markup=kb
+    )
+
+
+@router.message(BotStates.waiting_for_broadcast_custom_time)
+async def handle_broadcast_custom_time_input(message: Message, state: FSMContext):
+    """Прием ручного ввода времени для однократной запланированной рассылки."""
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if text.lower() in ("отмена", "/cancel", "отменить"):
+        await state.set_state(BotStates.waiting_for_broadcast_text)
+        data = await state.get_data()
+        bc_text = data.get("broadcast_text", "")
+        pin_message = data.get("pin_message", False)
+        scheduled_at = data.get("scheduled_at")
+        total_users = data.get("total_users") or len(await get_all_user_ids())
+        sch_label = scheduled_at if scheduled_at else "Сразу"
+        setup_text = render_broadcast_setup_text(bc_text, pin_message, scheduled_at, total_users)
+        kb = get_broadcast_setup_keyboard(pin_message, bool(scheduled_at), sch_label)
+        await safe_answer(message, setup_text, reply_markup=kb)
+        return
+
+    target_dt, err = parse_custom_scheduled_time(text)
+    if err or not target_dt:
+        err_text = err or "Не удалось распознать время."
+        await safe_answer(
+            message,
+            f"{te(PE_WARNING, '!')} {err_text}\n\n"
+            "Попробуйте ещё раз, например: <code>18:30</code> или <code>12.09 10:00</code>.\n"
+            "Или напишите <code>отмена</code>."
+        )
+        return
+
+    scheduled_at_str = target_dt.strftime("%Y-%m-%d %H:%M:00")
+    await state.update_data(scheduled_at=scheduled_at_str, repeat_type="once", repeat_time=None)
+    await state.set_state(BotStates.waiting_for_broadcast_text)
+
+    data = await state.get_data()
+    bc_text = data.get("broadcast_text", "")
+    pin_message = data.get("pin_message", False)
+    total_users = data.get("total_users") or len(await get_all_user_ids())
+
+    setup_text = render_broadcast_setup_text(bc_text, pin_message, scheduled_at_str, total_users)
+    kb = get_broadcast_setup_keyboard(pin_message, True, scheduled_at_str)
+    await safe_answer(
+        message,
+        f"{te(PE_CHECK)} Время отправки установлено: <code>{scheduled_at_str}</code>\n\n" + setup_text,
+        reply_markup=kb
+    )
+
+
+# ---------- Отдельная панель статистики (/statadmin, /stats) ----------
+
+async def render_stat_admin_menu_text() -> str:
+    """Формирует текст главного экрана панели статистики."""
+    stats = await get_bot_stats()
+    bc_summary = await get_broadcasts_summary()
+    return (
+        f"{te(PE_CHART_STATS)} <b>Панель статистики и аналитики</b>\n\n"
+        f"Добро пожаловать в панель просмотра показателей бота и отчётов по рассылкам.\n\n"
+        f"{te(PE_PEOPLE)} <b>Всего пользователей в базе:</b> <code>{stats['total']}</code>\n"
+        f"{te(PE_BELL)} <b>С включенными уведомлениями:</b> <code>{stats['with_notif']}</code>\n"
+        f"{te(PE_CHART_GROW)} <b>Активных пользователей за 24 часа:</b> <code>{stats['active_today']}</code>\n\n"
+        f"{te(PE_MEGAPHONE)} <b>Успешно завершено рассылок:</b> <code>{bc_summary['completed']}</code>\n"
+        f"{te(PE_CLOCK)} <b>Запланировано отложенных рассылок:</b> <code>{bc_summary['scheduled']}</code>\n"
+        f"{te(PE_CHECK)} <b>Суммарно доставлено сообщений:</b> <code>{bc_summary['sum_sent']}</code>\n\n"
+        f"<i>Выберите нужный раздел для подробного просмотра:</i>"
+    )
+
+
+async def render_stat_admin_bot_stats_text() -> str:
+    """Формирует детальную статистику аудитории бота."""
+    stats = await get_bot_stats()
+    top_groups_str = "\n".join([f"  • <b>{html.escape(g)}</b>: <code>{cnt}</code> чел." for g, cnt in stats["top_groups"]]) or "  <i>Нет данных</i>"
+    pct_notif = round(stats['with_notif'] / stats['total'] * 100, 1) if stats['total'] > 0 else 0
+    pct_group = round(stats['with_group'] / stats['total'] * 100, 1) if stats['total'] > 0 else 0
+    pct_teacher = round(stats['with_teacher'] / stats['total'] * 100, 1) if stats['total'] > 0 else 0
+
+    return (
+        f"{te(PE_CHART_STATS)} <b>Детальная статистика аудитории бота</b>\n\n"
+        f"{te(PE_PEOPLE)} Всего пользователей в базе: <b>{stats['total']}</b>\n"
+        f"{te(PE_BELL)} Включили уведомления: <b>{stats['with_notif']}</b> ({pct_notif}%)\n"
+        f"{te(PE_SEARCH)} Выбрали группу: <b>{stats['with_group']}</b> ({pct_group}%)\n"
+        f"{te(PE_PERSON_CHECK)} Выбрали преподавателя: <b>{stats['with_teacher']}</b> ({pct_teacher}%)\n\n"
+        f"{te(PE_CHART_GROW)} <b>Показатели активности:</b>\n"
+        f"  • Активны за последние 24 часа: <b>{stats['active_today']}</b> чел.\n"
+        f"  • Активны за последние 7 дней: <b>{stats['active_week']}</b> чел.\n\n"
+        f"{te(PE_STAR)} <b>Топ-5 популярных групп:</b>\n{top_groups_str}"
+    )
+
+
+async def render_broadcast_list_text(page: int = 0) -> Tuple[str, int, list]:
+    """Формирует текст списка рассылок с пагинацией."""
+    PAGE_SIZE = 5
+    total_count = await get_broadcasts_count()
+    total_pages = max(1, (total_count + PAGE_SIZE - 1) // PAGE_SIZE)
+    if page >= total_pages:
+        page = total_pages - 1
+    if page < 0:
+        page = 0
+
+    broadcasts = await get_broadcasts(limit=PAGE_SIZE, offset=page * PAGE_SIZE)
+    summary = await get_broadcasts_summary()
+
+    header = (
+        f"{te(PE_MEGAPHONE)} <b>История и статистика рассылок</b>\n\n"
+        f"{te(PE_CHECK)} Завершено: <b>{summary['completed']}</b> | "
+        f"{te(PE_CLOCK)} Запланировано: <b>{summary['scheduled']}</b> | "
+        f"{te(PE_CROSS)} Отменено: <b>{summary['cancelled']}</b>\n"
+        f"{te(PE_SEND_UP)} Всего доставлено сообщений: <b>{summary['sum_sent']}</b>\n\n"
+        f"Страница <b>{page + 1}</b> из <b>{total_pages}</b> (всего рассылок: {total_count}):\n"
+        f"<i>Нажмите на рассылку ниже, чтобы открыть карточку с подробностями:</i>"
+    )
+    if not broadcasts:
+        header += "\n\n<i>Рассылок пока не создавалось.</i>"
+
+    return header, total_pages, broadcasts
+
+
+def render_broadcast_detail_text(bc: Dict[str, Any]) -> str:
+    """Формирует подробную карточку конкретной рассылки."""
+    bc_id = bc["id"]
+    status = bc.get("status", "")
+    created_at = bc.get("created_at") or "Не указано"
+    scheduled_at = bc.get("scheduled_at")
+    completed_at = bc.get("completed_at")
+    repeat_type = bc.get("repeat_type", "once")
+    repeat_time = bc.get("repeat_time") or "07:00"
+    is_daily = (repeat_type == "daily")
+
+    pin = bool(bc.get("pin_message", 0))
+    pin_str = f"{te(PE_CHECK)} Да (закреплено в чатах)" if pin else f"{te(PE_CROSS)} Нет"
+
+    total = bc.get("total_targets", 0)
+    sent = bc.get("sent_count", 0)
+    blocked = bc.get("blocked_count", 0)
+    failed = bc.get("failed_count", 0)
+    pct = f"{(sent / total * 100):.1f}%" if total > 0 else "0%"
+
+    if is_daily and status == "scheduled":
+        status_line = f"{te(PE_REPEAT)} <b>Активна (ежедневно в {repeat_time})</b>"
+    elif status == "completed":
+        status_line = f"{te(PE_CHECK)} <b>Завершена</b> (завершена: {completed_at or '-'})"
+    elif status == "scheduled":
+        status_line = f"{te(PE_CLOCK)} <b>Запланирована на:</b> <code>{scheduled_at}</code>"
+    elif status == "in_progress":
+        status_line = f"{te(PE_REPEAT)} <b>В процессе доставки...</b>"
+    elif status == "cancelled":
+        status_line = f"{te(PE_CROSS)} <b>Отменена администратором</b>"
+    else:
+        status_line = f"{te(PE_INFO)} <b>{status}</b>"
+
+    if is_daily:
+        time_line = f"{te(PE_REPEAT)} <b>Каждый день в {repeat_time}</b> (след. отправка: <code>{scheduled_at}</code>)"
+    elif scheduled_at:
+        time_line = f"Запланировано на: <code>{scheduled_at}</code>"
+    else:
+        time_line = "Отправка: <i>Сразу</i>"
+
+    msg_preview = bc.get("message_text") or ""
+    if len(msg_preview) > 600:
+        msg_preview = msg_preview[:600] + "..."
+
+    return (
+        f"{te(PE_MEGAPHONE)} <b>Детальная статистика рассылки #{bc_id}</b>\n\n"
+        f"{te(PE_INFO)} <b>Статус:</b> {status_line}\n"
+        f"{te(PE_CALENDAR)} <b>Создана:</b> <code>{created_at}</code>\n"
+        f"{te(PE_CLOCK)} <b>Время отправки:</b> {time_line}\n"
+        f"{te(PE_PAPERCLIP)} <b>Закрепление:</b> {pin_str}\n\n"
+        f"{te(PE_CHART_STATS)} <b>Результаты доставки:</b>\n"
+        f"  {te(PE_CHECK)} Доставлено: <b>{sent}</b> из <b>{total}</b> ({pct})\n"
+        f"  {te(PE_BAN)} Заблокировали бота: <b>{blocked}</b>\n"
+        f"  {te(PE_WARNING)} Ошибок отправки: <b>{failed}</b>\n\n"
+        f"<b>Текст сообщения:</b>\n"
+        f"────────────────────\n"
+        f"{msg_preview}\n"
+        f"────────────────────"
+    )
+
+
+@router.message(Command("statadmin"))
+@router.message(Command("stats"))
+async def cmd_statadmin(message: Message, state: FSMContext):
+    """Открытие отдельной панели статистики бота и рассылок."""
+    await state.clear()
+    if not await is_stat_admin(message.from_user.id):
+        await safe_answer(
+            message,
+            f"{te(PE_WARNING, '!')} <b>Доступ запрещен.</b> У вас нет прав для просмотра аналитики."
+        )
+        return
+
+    text = await render_stat_admin_menu_text()
+    is_full = await is_admin(message.from_user.id)
+    await safe_answer(message, text, reply_markup=get_stat_admin_menu_keyboard(is_full_admin=is_full))
+
+
+@router.callback_query(StatAdminCallback.filter())
+async def cb_stat_admin_handler(query: CallbackQuery, callback_data: StatAdminCallback, state: FSMContext):
+    """Обработчик действий внутри панели аналитики и статистики."""
+    if not await is_stat_admin(query.from_user.id):
+        await safe_query_answer(query, "Доступ запрещен.", show_alert=True)
+        return
+
+    action = callback_data.action
+    is_full = await is_admin(query.from_user.id)
+
+    if action == "menu":
+        text = await render_stat_admin_menu_text()
+        await safe_edit_text(query.message, text, reply_markup=get_stat_admin_menu_keyboard(is_full_admin=is_full))
+        await safe_query_answer(query)
+
+    elif action == "bot_stats":
+        text = await render_stat_admin_bot_stats_text()
+        await safe_edit_text(query.message, text, reply_markup=get_stat_admin_bot_stats_keyboard())
+        await safe_query_answer(query)
+
+    elif action == "broadcast_list":
+        page = callback_data.page
+        text, total_pages, broadcasts = await render_broadcast_list_text(page)
+        kb = get_broadcast_list_keyboard(broadcasts, page, total_pages)
+        await safe_edit_text(query.message, text, reply_markup=kb)
+        await safe_query_answer(query)
+
+    elif action == "broadcast_detail":
+        bc_id = callback_data.bc_id
+        page = callback_data.page
+        bc = await get_broadcast(bc_id)
+        if not bc:
+            await safe_query_answer(query, "Рассылка не найдена.", show_alert=True)
+            return
+
+        text = render_broadcast_detail_text(bc)
+        is_scheduled = (bc.get("status") == "scheduled")
+        kb = get_broadcast_detail_keyboard(bc_id, is_scheduled, page=page)
+        await safe_edit_text(query.message, text, reply_markup=kb)
+        await safe_query_answer(query)
+
+    elif action == "broadcast_cancel":
+        bc_id = callback_data.bc_id
+        page = callback_data.page
+        cancelled = await cancel_broadcast(bc_id)
+        if cancelled:
+            await safe_query_answer(query, f"Запланированная рассылка #{bc_id} успешно отменена!", show_alert=True)
+        else:
+            await safe_query_answer(query, "Не удалось отменить рассылку (возможно, она уже выполняется или завершена).", show_alert=True)
+
+        bc = await get_broadcast(bc_id)
+        if bc:
+            text = render_broadcast_detail_text(bc)
+            kb = get_broadcast_detail_keyboard(bc_id, is_scheduled=False, page=page)
+            await safe_edit_text(query.message, text, reply_markup=kb)
+
+    elif action == "close":
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
