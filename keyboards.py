@@ -69,6 +69,9 @@ def get_main_keyboard(is_admin_user: bool = False, is_stat_admin_user: bool = Fa
         [
             KeyboardButton(text="Выбрать дату", icon_custom_emoji_id=PE_CLOCK),
             KeyboardButton(text="Моя группа", icon_custom_emoji_id=PE_PEOPLE)
+        ],
+        [
+            KeyboardButton(text="Преподаватели", icon_custom_emoji_id=PE_PERSON_CHECK)
         ]
     ]
     if is_admin_user:
@@ -129,6 +132,13 @@ def get_main_menu_inline(is_admin_user: bool = False, is_stat_admin_user: bool =
                 text="Моя группа",
                 icon_custom_emoji_id=PE_PEOPLE,
                 callback_data=MenuCallback(action="mygroup").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Преподаватели",
+                icon_custom_emoji_id=PE_PERSON_CHECK,
+                callback_data=MenuCallback(action="teachers").pack()
             )
         ]
     ]
@@ -958,4 +968,3 @@ def get_broadcast_detail_keyboard(
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=kb)
-

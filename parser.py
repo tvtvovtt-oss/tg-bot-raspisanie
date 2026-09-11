@@ -10,8 +10,8 @@ from config import ALMETPT_BASE_URL
 from premium_emoji import (
     te, PE_CALENDAR, PE_CLOCK, PE_BELL, PE_PEOPLE, PE_SEARCH,
     PE_HOUSE, PE_ARROW_LEFT, PE_REPEAT, PE_LINK,
-    PE_PERSON_CHECK, PE_INFO, PE_CHECK, PE_PARTY, PE_PENCIL,
-    PE_FILE, PE_WARNING, PE_GEOTAG, PE_STAR, PE_TIME_PASSED
+    PE_PERSON_CHECK, PE_INFO, PE_CHECK, PE_PARTY, PE_WARNING,
+    PE_GEOTAG, PE_STAR, PE_TIME_PASSED
 )
 
 # Caching containers
@@ -1277,18 +1277,6 @@ def format_schedule_message(
 
                 lines.append(f" {sg_part}{subj_escaped}{aud_part}{teacher_part}")
 
-                # Homework & Topic if present
-                if sub.get("homework"):
-                    hw = sub["homework"].strip()
-                    if len(hw) > 200:
-                        hw = hw[:197] + "..."
-                    lines.append(f"   {te(PE_PENCIL)} <i>Д/з: {html.escape(hw)}</i>")
-                elif sub.get("topic"):
-                    top = sub["topic"].strip()
-                    if len(top) > 150:
-                        top = top[:147] + "..."
-                    lines.append(f"   {te(PE_FILE)} <i>Тема: {html.escape(top)}</i>")
-
         lines.append("")  # Empty line between pairs
 
     return safe_join_lines(lines)
@@ -1399,6 +1387,14 @@ def format_teacher_schedule_message(
             aud_part = ""
 
         details = l.get("details", "").strip()
+        # На странице преподавателя тема и домашнее задание входят в общий
+        # текст карточки. Не выводим эту часть в расписании бота.
+        details = re.split(
+            r"\b(?:Тема|Д\.?\s*/?\s*з)\s*:",
+            details,
+            maxsplit=1,
+            flags=re.IGNORECASE
+        )[0].strip()
         details_part = f" {html.escape(details)}" if details else ""
 
         line_body = f"{grp_part}{aud_part}{details_part}".strip()

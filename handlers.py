@@ -257,7 +257,8 @@ async def cmd_help(message: Message):
         f"{te(PE_INFO)} <b>Как пользоваться ботом:</b>\n\n"
         f"• {te(PE_CALENDAR)} <b>На сегодня / На завтра</b> — расписание твоей группы\n"
         f"• {te(PE_CLOCK)} <b>Выбрать дату</b> — расписание на любой день\n"
-        f"• {te(PE_PEOPLE)} <b>Моя группа</b> — текущая группа, смена группы и уведомления\n\n"
+        f"• {te(PE_PEOPLE)} <b>Моя группа</b> — текущая группа, смена группы и уведомления\n"
+        f"• {te(PE_PERSON_CHECK)} <b>Преподаватели</b> — поиск по алфавиту, имени или фамилии\n\n"
         f"{te(PE_SEARCH)} <b>Быстрый поиск группы:</b> просто отправь в чат её номер или первые буквы (например: <code>ИС</code>, <code>253</code> или <code>АВ-261</code>)!\n\n"
         f"{te(PE_STAR)} <i>Подсказка: ты можешь нажать /start один раз и дальше переключаться кнопками меню!</i>"
     )
@@ -1908,5 +1909,3 @@ async def handle_db_document_upload(message: Message):
             await safe_edit_text(status_msg, fail_text)
         else:
             await safe_answer(message, fail_text)
-
-
