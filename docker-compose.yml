@@ -8,4 +8,9 @@ services:
     env_file:
       - .env
     volumes:
-      - ./bot.db:/app/bot.db
+      - bot_data:/app/data
+    environment:
+      - DATABASE_PATH=/app/data/bot.db
+
+volumes:
+  bot_data:

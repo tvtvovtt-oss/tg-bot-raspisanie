@@ -1,5 +1,7 @@
 import aiosqlite
 import logging
+import shutil
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Set
 from config import DATABASE_PATH, ADMIN_IDS, STAT_ADMIN_IDS
@@ -13,7 +15,24 @@ _STAT_ADMIN_IDS_CACHE: Optional[Set[int]] = None
 
 async def init_db():
     global _MAINTENANCE_CACHE, _ADMIN_IDS_CACHE, _STAT_ADMIN_IDS_CACHE
+
+    db_path = Path(DATABASE_PATH)
+    if db_path.parent and not db_path.parent.exists():
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Авто-миграция: если база в новом расположении пуста, но существует локальная bot.db
+    legacy_db = Path("bot.db")
+    if (not db_path.exists() or db_path.stat().st_size == 0) and legacy_db.exists():
+        try:
+            if legacy_db.resolve() != db_path.resolve():
+                logger.info(f"Копирование существующей базы {legacy_db} в постоянное хранилище {db_path}")
+                shutil.copy2(legacy_db, db_path)
+        except Exception as e:
+            logger.warning(f"Не удалось скопировать старую базу: {e}")
+
     async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL;")
+        await db.execute("PRAGMA busy_timeout=5000;")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,

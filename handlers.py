@@ -5,7 +5,7 @@ import re
 from typing import Optional, Dict, Any, Tuple
 
 from aiogram import Router, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
@@ -74,7 +74,7 @@ from premium_emoji import (
     te, strip_tg_emoji, PE_BOT, PE_CALENDAR, PE_BELL, PE_SEARCH, PE_PEOPLE, PE_INFO, PE_CHECK,
     PE_CLOCK, PE_HOUSE, PE_PERSON_CHECK, PE_TIME_PASSED, PE_STAR, PE_WARNING,
     PE_WRITE, PE_LINK, PE_REPEAT, PE_ARROW_LEFT, PE_CROSS,
-    PE_SETTINGS, PE_LOCK_CLOSED, PE_LOCK_OPEN, PE_CHART_STATS, PE_MEGAPHONE, PE_BAN,
+    PE_SETTINGS, PE_LOCK_CLOSED, PE_LOCK_OPEN, PE_CHART_STATS, PE_CHART_GROW, PE_MEGAPHONE, PE_BAN,
     PE_PAPERCLIP, PE_SEND_UP
 )
 
@@ -230,13 +230,13 @@ async def cmd_help(message: Message):
 
 # ---------- Обработчики текстовых кнопок Reply-клавиатуры ----------
 
-@router.message(F.text.in_({"Панель администратора", "Админ-панель", "Админка", "⚙️ Панель администратора"}))
+@router.message(StateFilter("*"), F.text.in_({"Панель администратора", "Админ-панель", "Админка", "⚙️ Панель администратора"}))
 async def handle_reply_admin_button(message: Message, state: FSMContext):
     """Открытие админ-панели по нажатию reply-кнопки."""
     await cmd_admin(message, state)
 
 
-@router.message(F.text.in_({"Статистика", "Статистика бота", "Статистика и рассылки", "📊 Статистика", "Аналитика"}))
+@router.message(StateFilter("*"), F.text.in_({"Статистика", "Статистика бота", "Статистика и рассылки", "📊 Статистика", "Аналитика"}))
 async def handle_reply_stats_button(message: Message, state: FSMContext):
     """Открытие панели статистики по нажатию reply-кнопки."""
     await cmd_statadmin(message, state)
@@ -829,7 +829,7 @@ async def render_admin_panel_text() -> str:
     )
 
 
-@router.message(Command("admin"))
+@router.message(Command("admin", "adm"), StateFilter("*"))
 async def cmd_admin(message: Message, state: FSMContext):
     """Команда открытия панели администратора."""
     await state.clear()
@@ -1467,7 +1467,7 @@ def render_broadcast_detail_text(bc: Dict[str, Any]) -> str:
 
 
 @router.message(Command("statadmin"))
-@router.message(Command("stats"))
+@router.message(Command("statadmin", "stats", "stat", "statistics"), StateFilter("*"))
 async def cmd_statadmin(message: Message, state: FSMContext):
     """Открытие отдельной панели статистики бота и рассылок."""
     await state.clear()

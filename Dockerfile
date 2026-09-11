@@ -13,5 +13,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy project files
 COPY . .
 
+# Persistent data directory for SQLite database
+RUN mkdir -p /app/data
+VOLUME ["/app/data"]
+ENV DATABASE_PATH=/app/data/bot.db
+
 # Run bot
 CMD ["python", "bot.py"]
