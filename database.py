@@ -46,11 +46,31 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # In case the table already existed without notifications column
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN notifications INTEGER DEFAULT 1")
-        except Exception:
-            pass
+        # Автоматическая миграция недостающих колонок в таблице users
+        cursor = await db.execute("PRAGMA table_info(users)")
+        existing_cols = {row[1] for row in await cursor.fetchall()}
+        col_defs = {
+            "username": "TEXT",
+            "first_name": "TEXT",
+            "group_id": "TEXT",
+            "group_name": "TEXT",
+            "teacher_id": "TEXT",
+            "teacher_name": "TEXT",
+            "notifications": "INTEGER DEFAULT 1",
+            "updated_at": "TIMESTAMP"
+        }
+        for col_name, col_type in col_defs.items():
+            if col_name not in existing_cols:
+                try:
+                    await db.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}")
+                except Exception as e:
+                    logger.debug(f"Migrate column {col_name} note: {e}")
+
+        if "updated_at" not in existing_cols:
+            try:
+                await db.execute("UPDATE users SET updated_at = datetime('now') WHERE updated_at IS NULL")
+            except Exception:
+                pass
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS notified_schedules (

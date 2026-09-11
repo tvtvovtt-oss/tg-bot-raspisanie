@@ -12,7 +12,8 @@ from premium_emoji import (
     PE_HOUSE, PE_ARROW_LEFT, PE_ARROW_RIGHT, PE_REPEAT, PE_LINK,
     PE_PERSON_CHECK, PE_CLOCK, PE_INFO, PE_CHECK,
     PE_SETTINGS, PE_LOCK_CLOSED, PE_LOCK_OPEN, PE_CHART_STATS,
-    PE_MEGAPHONE, PE_CROSS, PE_PAPERCLIP, PE_SEND_UP, PE_STAR, PE_BAN, PE_WARNING
+    PE_MEGAPHONE, PE_CROSS, PE_PAPERCLIP, PE_SEND_UP, PE_STAR, PE_BAN, PE_WARNING,
+    PE_FILE
 )
 
 
@@ -549,6 +550,13 @@ def get_admin_keyboard(is_maintenance: bool) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(
+                text="Скачать бэкап базы данных",
+                icon_custom_emoji_id=PE_FILE,
+                callback_data=AdminCallback(action="backup").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 text="Закрыть панель",
                 icon_custom_emoji_id=PE_CROSS,
                 callback_data=AdminCallback(action="close").pack()
@@ -569,6 +577,45 @@ def get_admin_back_keyboard() -> InlineKeyboardMarkup:
             )
         ]
     ])
+
+
+def get_broadcast_cancel_keyboard(is_full_admin: bool = True) -> InlineKeyboardMarkup:
+    """Клавиатура отмены создания рассылки."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Отменить создание рассылки",
+                icon_custom_emoji_id=PE_CROSS,
+                callback_data=BroadcastCallback(action="cancel").pack()
+            )
+        ]
+    ])
+
+
+def get_broadcast_finish_keyboard(is_full_admin: bool = True) -> InlineKeyboardMarkup:
+    """Клавиатура после завершения/подтверждения рассылки."""
+    kb = []
+    if is_full_admin:
+        kb.append([
+            InlineKeyboardButton(
+                text="В админ-панель",
+                icon_custom_emoji_id=PE_SETTINGS,
+                callback_data=AdminCallback(action="panel").pack()
+            )
+        ])
+    kb.append([
+        InlineKeyboardButton(
+            text="К списку рассылок",
+            icon_custom_emoji_id=PE_MEGAPHONE,
+            callback_data=StatAdminCallback(action="broadcast_list", page=0).pack()
+        ),
+        InlineKeyboardButton(
+            text="В меню аналитики",
+            icon_custom_emoji_id=PE_HOUSE,
+            callback_data=StatAdminCallback(action="menu").pack()
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 # ---------- Клавиатуры настройки рассылки ----------
@@ -727,6 +774,20 @@ def get_stat_admin_menu_keyboard(is_full_admin: bool = False) -> InlineKeyboardM
         ],
         [
             InlineKeyboardButton(
+                text="Создать новую рассылку",
+                icon_custom_emoji_id=PE_SEND_UP,
+                callback_data=StatAdminCallback(action="create_broadcast").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Скачать бэкап базы данных",
+                icon_custom_emoji_id=PE_FILE,
+                callback_data=StatAdminCallback(action="backup").pack()
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 text="Обновить показатели",
                 icon_custom_emoji_id=PE_REPEAT,
                 callback_data=StatAdminCallback(action="menu").pack()
@@ -843,6 +904,13 @@ def get_broadcast_list_keyboard(
         kb.append(nav_row)
 
     # Управление
+    kb.append([
+        InlineKeyboardButton(
+            text="Создать новую рассылку",
+            icon_custom_emoji_id=PE_SEND_UP,
+            callback_data=StatAdminCallback(action="create_broadcast").pack()
+        )
+    ])
     kb.append([
         InlineKeyboardButton(
             text="Обновить список",

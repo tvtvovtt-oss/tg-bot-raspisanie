@@ -34,6 +34,11 @@ venv.bak/
 *.db
 *.sqlite
 *.sqlite3
+*.db-wal
+*.db-shm
+*.restore_temp
+*.uploaded_temp
+backups/
 
 # IDE
 .vscode/

@@ -24,5 +24,16 @@ ADMIN_IDS = parse_admin_ids(os.getenv("ADMIN_IDS", "5966353805,7218741941"))
 STAT_ADMIN_IDS = parse_admin_ids(os.getenv("STAT_ADMIN_IDS", ""))
 ENABLE_NOTIFICATIONS = os.getenv("ENABLE_NOTIFICATIONS", "false").strip().lower() in ("true", "1", "yes")
 
+def parse_chat_id(raw_val: str):
+    raw_val = (raw_val or "").strip()
+    if not raw_val:
+        return None
+    try:
+        return int(raw_val)
+    except ValueError:
+        return raw_val
+
+BACKUP_CHANNEL_ID = parse_chat_id(os.getenv("BACKUP_CHANNEL_ID", ""))
+
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан в .env файле!")

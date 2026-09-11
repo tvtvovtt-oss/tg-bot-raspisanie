@@ -8,12 +8,13 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
-from config import BOT_TOKEN, PROXY_URL, ENABLE_NOTIFICATIONS
+from config import BOT_TOKEN, PROXY_URL, ENABLE_NOTIFICATIONS, BACKUP_CHANNEL_ID
 from database import init_db
 from handlers import router
 from parser import get_groups, get_available_dates
 from notifier import schedule_notification_worker
 from broadcast_service import broadcast_scheduler_worker
+from backup_service import auto_restore_if_needed, backup_scheduler_worker, send_backup_to_channel
 from middlewares import MaintenanceMiddleware
 
 # Configure logging
@@ -40,8 +41,22 @@ async def set_bot_commands(bot: Bot):
 
 
 async def main():
-    logger.info("Инициализация базы данных...")
-    await init_db()
+    # Set up session (with proxy if provided)
+    if PROXY_URL:
+        logger.info(f"Используется прокси для Telegram API: {PROXY_URL}")
+        session = AiohttpSession(proxy=PROXY_URL)
+    else:
+        session = None
+
+    logger.info("Создание экземпляра Telegram-бота...")
+    bot = Bot(
+        token=BOT_TOKEN,
+        session=session,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
+
+    logger.info("Инициализация базы данных и проверка авто-восстановления...")
+    await auto_restore_if_needed(bot)
 
     logger.info("Предзагрузка списка групп и дат с almetpt.ru...")
     try:
@@ -51,19 +66,6 @@ async def main():
     except Exception as e:
         logger.warning(f"Ошибка при предварительной загрузке: {e}")
 
-    # Set up session (with proxy if provided)
-    if PROXY_URL:
-        logger.info(f"Используется прокси для Telegram API: {PROXY_URL}")
-        session = AiohttpSession(proxy=PROXY_URL)
-    else:
-        session = None
-
-    logger.info("Запуск Telegram-бота...")
-    bot = Bot(
-        token=BOT_TOKEN,
-        session=session,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-    )
     dp = Dispatcher()
     dp.message.outer_middleware(MaintenanceMiddleware())
     dp.callback_query.outer_middleware(MaintenanceMiddleware())
@@ -87,6 +89,10 @@ async def main():
     broadcast_task = asyncio.create_task(broadcast_scheduler_worker(bot))
     logger.info("Фоновый планировщик отложенных рассылок запущен.")
 
+    # Start background backup scheduler worker (every 30 minutes)
+    backup_task = asyncio.create_task(backup_scheduler_worker(bot))
+    logger.info("Фоновый сервис автоматического резервного копирования запущен (раз в 30 мин).")
+
     logger.info("Бот успешно запущен и готов к работе!")
     try:
         await dp.start_polling(bot)
@@ -95,6 +101,14 @@ async def main():
             notifier_task.cancel()
         if broadcast_task:
             broadcast_task.cancel()
+        if backup_task:
+            backup_task.cancel()
+        try:
+            if BACKUP_CHANNEL_ID:
+                logger.info("Сохранение финального бэкапа перед завершением работы...")
+                await send_backup_to_channel(bot, caption_extra="Финальный авто-бэкап перед перезапуском контейнера")
+        except Exception as e:
+            logger.debug(f"Не удалось отправить финальный бэкап: {e}")
         await bot.session.close()
         logger.info("Бот остановлен.")
 
