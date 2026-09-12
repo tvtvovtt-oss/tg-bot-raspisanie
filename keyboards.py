@@ -12,7 +12,7 @@ from premium_emoji import (
     PE_HOUSE, PE_ARROW_LEFT, PE_ARROW_RIGHT, PE_REPEAT, PE_LINK,
     PE_PERSON_CHECK, PE_CLOCK, PE_INFO, PE_CHECK,
     PE_SETTINGS, PE_LOCK_CLOSED, PE_LOCK_OPEN, PE_CHART_STATS,
-    PE_MEGAPHONE, PE_CROSS, PE_PAPERCLIP, PE_SEND_UP, PE_STAR, PE_BAN, PE_WARNING,
+    PE_MEGAPHONE, PE_CROSS, PE_SEND_UP,
     PE_FILE
 )
 
@@ -279,7 +279,7 @@ def get_zaochn_selection_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="4 курс (заоч.)", icon_custom_emoji_id=PE_SEARCH, callback_data=GroupCallback(action="course", course=4, form="correspondence").pack())
         ],
         [
-            InlineKeyboardButton(text="Все группы заочного (38)", icon_custom_emoji_id=PE_PEOPLE, callback_data=GroupCallback(action="zaochn_all").pack())
+            InlineKeyboardButton(text="Все группы заочного", icon_custom_emoji_id=PE_PEOPLE, callback_data=GroupCallback(action="zaochn_all").pack())
         ],
         [
             InlineKeyboardButton(text="К очному отделению", icon_custom_emoji_id=PE_ARROW_LEFT, callback_data=MenuCallback(action="change_group").pack())
@@ -784,20 +784,6 @@ def get_stat_admin_menu_keyboard(is_full_admin: bool = False) -> InlineKeyboardM
         ],
         [
             InlineKeyboardButton(
-                text="Создать новую рассылку",
-                icon_custom_emoji_id=PE_SEND_UP,
-                callback_data=StatAdminCallback(action="create_broadcast").pack()
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="Скачать бэкап базы данных",
-                icon_custom_emoji_id=PE_FILE,
-                callback_data=StatAdminCallback(action="backup").pack()
-            )
-        ],
-        [
-            InlineKeyboardButton(
                 text="Обновить показатели",
                 icon_custom_emoji_id=PE_REPEAT,
                 callback_data=StatAdminCallback(action="menu").pack()
@@ -805,13 +791,25 @@ def get_stat_admin_menu_keyboard(is_full_admin: bool = False) -> InlineKeyboardM
         ]
     ]
     if is_full_admin:
-        kb.append([
+        kb.extend([[
+            InlineKeyboardButton(
+                text="Создать новую рассылку",
+                icon_custom_emoji_id=PE_SEND_UP,
+                callback_data=StatAdminCallback(action="create_broadcast").pack()
+            )
+        ], [
+            InlineKeyboardButton(
+                text="Скачать бэкап базы данных",
+                icon_custom_emoji_id=PE_FILE,
+                callback_data=StatAdminCallback(action="backup").pack()
+            )
+        ], [
             InlineKeyboardButton(
                 text="Панель администратора (/admin)",
                 icon_custom_emoji_id=PE_SETTINGS,
                 callback_data=AdminCallback(action="panel").pack()
             )
-        ])
+        ]])
     kb.append([
         InlineKeyboardButton(
             text="Закрыть панель",
@@ -850,7 +848,8 @@ def get_stat_admin_bot_stats_keyboard() -> InlineKeyboardMarkup:
 def get_broadcast_list_keyboard(
     broadcasts: List[Dict[str, Any]],
     page: int,
-    total_pages: int
+    total_pages: int,
+    is_full_admin: bool = False
 ) -> InlineKeyboardMarkup:
     """Клавиатура со списком рассылок и пагинацией."""
     kb: List[List[InlineKeyboardButton]] = []
@@ -914,13 +913,14 @@ def get_broadcast_list_keyboard(
         kb.append(nav_row)
 
     # Управление
-    kb.append([
-        InlineKeyboardButton(
-            text="Создать новую рассылку",
-            icon_custom_emoji_id=PE_SEND_UP,
-            callback_data=StatAdminCallback(action="create_broadcast").pack()
-        )
-    ])
+    if is_full_admin:
+        kb.append([
+            InlineKeyboardButton(
+                text="Создать новую рассылку",
+                icon_custom_emoji_id=PE_SEND_UP,
+                callback_data=StatAdminCallback(action="create_broadcast").pack()
+            )
+        ])
     kb.append([
         InlineKeyboardButton(
             text="Обновить список",
@@ -940,12 +940,13 @@ def get_broadcast_list_keyboard(
 def get_broadcast_detail_keyboard(
     bc_id: int,
     is_scheduled: bool,
-    page: int = 0
+    page: int = 0,
+    can_cancel: bool = False
 ) -> InlineKeyboardMarkup:
     """Клавиатура детального просмотра рассылки."""
     kb: List[List[InlineKeyboardButton]] = []
 
-    if is_scheduled:
+    if is_scheduled and can_cancel:
         kb.append([
             InlineKeyboardButton(
                 text="Отменить запланированную рассылку",

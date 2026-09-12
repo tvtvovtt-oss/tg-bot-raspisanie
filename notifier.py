@@ -1,15 +1,18 @@
 import asyncio
+import hashlib
+import json
 import logging
 from typing import Dict, List, Any
 from datetime import datetime
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 from database import (
     get_users_for_notifications,
     is_user_notified,
     mark_user_notified,
+    disable_user_notifications,
     is_maintenance_mode
 )
 from parser import (
@@ -18,7 +21,6 @@ from parser import (
     get_teacher_schedule,
     format_schedule_message,
     format_teacher_schedule_message,
-    format_russian_date,
     format_schedule_notification_date,
     is_schedule_published
 )
@@ -35,6 +37,53 @@ POLL_INTERVAL_SECONDS = 180
 
 # Tracks if this is the first execution after bot startup
 _IS_FIRST_RUN = True
+
+
+def schedule_fingerprint(schedule: Dict[str, Any]) -> str:
+    """Hashes only user-visible schedule data so real changes trigger a new alert."""
+    payload = {
+        "lessons": schedule.get("lessons", []),
+        "practices": schedule.get("practices", []),
+        "consultations": schedule.get("consultations", []),
+        "alerts": schedule.get("alerts", []),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+async def _send_notification(bot: Bot, user_id: int, text: str, reply_markup) -> str:
+    """Returns sent, blocked, or failed; transient failures remain retryable."""
+    current_text = text
+    fallback_used = False
+    for attempt in range(3):
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=current_text,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+            return "sent"
+        except TelegramRetryAfter as exc:
+            if attempt == 2:
+                logger.warning("Telegram rate limit persisted for user %s", user_id)
+                return "failed"
+            await asyncio.sleep(max(float(exc.retry_after), 0.1) + 0.1)
+        except TelegramForbiddenError:
+            return "blocked"
+        except TelegramBadRequest as exc:
+            if not fallback_used:
+                clean_text = strip_tg_emoji(current_text)
+                if clean_text != current_text:
+                    current_text = clean_text
+                    fallback_used = True
+                    continue
+            logger.warning("Не удалось отправить уведомление %s: %s", user_id, exc)
+            return "failed"
+        except Exception as exc:
+            logger.warning("Не удалось отправить уведомление %s: %s", user_id, exc)
+            return "failed"
+    return "failed"
 
 
 async def check_and_notify_users(bot: Bot):
@@ -68,55 +117,66 @@ async def check_and_notify_users(bot: Bot):
         if not users:
             return
 
-        # On first startup, pre-mark existing current dates so we don't spam notifications
-        # for schedules that were already available when bot launched
-        if _IS_FIRST_RUN:
-            for u in users:
-                u_id = u["user_id"]
-                if u.get("group_id"):
-                    for d_str in available_dates:
-                        await mark_user_notified(u_id, "group", u["group_id"], d_str)
-                if u.get("teacher_id"):
-                    for d_str in available_dates:
-                        await mark_user_notified(u_id, "teacher", u["teacher_id"], d_str)
-            _IS_FIRST_RUN = False
-            logger.info(f"Notifier инициализирован: сохранено {len(users)} пользователей и {len(available_dates)} дат.")
-            return
-
-        # Group users by group_id and teacher_id to minimize requests to almetpt.ru
+        # Group users by target to minimize requests to almetpt.ru.
         groups_map: Dict[str, List[Dict[str, Any]]] = {}
         teachers_map: Dict[str, List[Dict[str, Any]]] = {}
-
         for u in users:
             if u.get("group_id"):
                 groups_map.setdefault(str(u["group_id"]), []).append(u)
             if u.get("teacher_id"):
                 teachers_map.setdefault(str(u["teacher_id"]), []).append(u)
 
+        # On first startup, pre-mark existing current dates so we don't spam notifications
+        # for schedules that were already available when bot launched
+        if _IS_FIRST_RUN:
+            for group_id, group_users in groups_map.items():
+                for date_str in available_dates:
+                    schedule = await get_group_schedule(group_id, date_str, force_refresh=True)
+                    if is_schedule_published(schedule):
+                        fingerprint = schedule_fingerprint(schedule)
+                        for user in group_users:
+                            await mark_user_notified(
+                                user["user_id"], "group", group_id, date_str, fingerprint
+                            )
+            for teacher_id, teacher_users in teachers_map.items():
+                for date_str in available_dates:
+                    schedule = await get_teacher_schedule(teacher_id, date_str, force_refresh=True)
+                    if is_schedule_published(schedule):
+                        fingerprint = schedule_fingerprint(schedule)
+                        for user in teacher_users:
+                            await mark_user_notified(
+                                user["user_id"], "teacher", teacher_id, date_str, fingerprint
+                            )
+            _IS_FIRST_RUN = False
+            logger.info(f"Notifier инициализирован: сохранено {len(users)} пользователей и {len(available_dates)} дат.")
+            return
+
         # 1. Process group schedules
         for g_id, group_users in groups_map.items():
             g_name = group_users[0].get("group_name") or f"Группа {g_id}"
             
             for date_str in available_dates:
+                # Fetch once per group/date, then compare its fingerprint for all users.
+                sched = await get_group_schedule(g_id, date_str, force_refresh=True)
+                if not is_schedule_published(sched):
+                    continue
+                fingerprint = schedule_fingerprint(sched)
+
                 # Find users who have not received notification for this group and date
                 pending_users = []
                 for u in group_users:
-                    notified = await is_user_notified(u["user_id"], "group", g_id, date_str)
+                    notified = await is_user_notified(
+                        u["user_id"], "group", g_id, date_str, fingerprint
+                    )
                     if not notified:
                         pending_users.append(u)
 
                 if not pending_users:
                     continue
 
-                # Fetch schedule once for this group and date
-                sched = await get_group_schedule(g_id, date_str, force_refresh=True)
-                if not is_schedule_published(sched):
-                    # If empty, 'не опубликовано' or failed, skip so we can notify when it truly publishes
-                    continue
-
                 human_date = format_schedule_notification_date(date_str)
                 header = (
-                    f"{te(PE_BELL)} <b>Опубликовано новое расписание на {human_date}!</b>\n\n"
+                    f"{te(PE_BELL)} <b>Опубликовано или обновлено расписание на {human_date}!</b>\n\n"
                 )
                 body = format_schedule_message(sched, g_name, date_str)
                 full_text = header + body
@@ -125,54 +185,38 @@ async def check_and_notify_users(bot: Bot):
 
                 for u in pending_users:
                     u_id = u["user_id"]
-                    try:
-                        await bot.send_message(
-                            chat_id=u_id,
-                            text=full_text,
-                            reply_markup=kb,
-                            disable_web_page_preview=True
-                        )
+                    outcome = await _send_notification(bot, u_id, full_text, kb)
+                    if outcome == "sent":
                         logger.info(f"Уведомление о расписании отправлено пользователю {u_id} (группа {g_name}, дата {date_str})")
-                    except TelegramBadRequest as e:
-                        try:
-                            clean_text = strip_tg_emoji(full_text)
-                            await bot.send_message(
-                                chat_id=u_id,
-                                text=clean_text,
-                                reply_markup=kb,
-                                disable_web_page_preview=True
-                            )
-                            logger.info(f"Уведомление о расписании отправлено пользователю {u_id} (без тегов эмодзи)")
-                        except Exception as e2:
-                            logger.warning(f"Не удалось отправить уведомление {u_id}: {e2}")
-                    except TelegramForbiddenError as e:
-                        logger.warning(f"Пользователь {u_id} заблокировал бота: {e}")
-                    except Exception as e:
-                        logger.error(f"Неожиданная ошибка при отправке пользователю {u_id}: {e}")
-                    finally:
-                        await mark_user_notified(u_id, "group", g_id, date_str)
+                        await mark_user_notified(u_id, "group", g_id, date_str, fingerprint)
+                    elif outcome == "blocked":
+                        logger.info("Пользователь %s заблокировал бота; уведомления отключены.", u_id)
+                        await disable_user_notifications(u_id)
 
         # 2. Process teacher schedules
         for t_id, teacher_users in teachers_map.items():
             t_name = teacher_users[0].get("teacher_name") or "Преподаватель"
 
             for date_str in available_dates:
+                sched = await get_teacher_schedule(t_id, date_str, force_refresh=True)
+                if not is_schedule_published(sched):
+                    continue
+                fingerprint = schedule_fingerprint(sched)
+
                 pending_users = []
                 for u in teacher_users:
-                    notified = await is_user_notified(u["user_id"], "teacher", t_id, date_str)
+                    notified = await is_user_notified(
+                        u["user_id"], "teacher", t_id, date_str, fingerprint
+                    )
                     if not notified:
                         pending_users.append(u)
 
                 if not pending_users:
                     continue
 
-                sched = await get_teacher_schedule(t_id, date_str, force_refresh=True)
-                if not is_schedule_published(sched):
-                    continue
-
                 human_date = format_schedule_notification_date(date_str)
                 header = (
-                    f"{te(PE_BELL)} <b>Опубликовано новое расписание на {human_date}!</b>\n\n"
+                    f"{te(PE_BELL)} <b>Опубликовано или обновлено расписание на {human_date}!</b>\n\n"
                 )
                 body = format_teacher_schedule_message(sched, t_name, date_str)
                 full_text = header + body
@@ -181,32 +225,13 @@ async def check_and_notify_users(bot: Bot):
 
                 for u in pending_users:
                     u_id = u["user_id"]
-                    try:
-                        await bot.send_message(
-                            chat_id=u_id,
-                            text=full_text,
-                            reply_markup=kb,
-                            disable_web_page_preview=True
-                        )
+                    outcome = await _send_notification(bot, u_id, full_text, kb)
+                    if outcome == "sent":
                         logger.info(f"Уведомление отправлено пользователю {u_id} (преподаватель {t_name}, дата {date_str})")
-                    except TelegramBadRequest as e:
-                        try:
-                            clean_text = strip_tg_emoji(full_text)
-                            await bot.send_message(
-                                chat_id=u_id,
-                                text=clean_text,
-                                reply_markup=kb,
-                                disable_web_page_preview=True
-                            )
-                            logger.info(f"Уведомление отправлено пользователю {u_id} (без тегов эмодзи)")
-                        except Exception as e2:
-                            logger.warning(f"Не удалось отправить уведомление {u_id}: {e2}")
-                    except TelegramForbiddenError as e:
-                        logger.warning(f"Пользователь {u_id} заблокировал бота: {e}")
-                    except Exception as e:
-                        logger.error(f"Неожиданная ошибка при отправке {u_id}: {e}")
-                    finally:
-                        await mark_user_notified(u_id, "teacher", t_id, date_str)
+                        await mark_user_notified(u_id, "teacher", t_id, date_str, fingerprint)
+                    elif outcome == "blocked":
+                        logger.info("Пользователь %s заблокировал бота; уведомления отключены.", u_id)
+                        await disable_user_notifications(u_id)
 
     except Exception as e:
         logger.error(f"Ошибка в цикле проверки расписания: {e}", exc_info=True)

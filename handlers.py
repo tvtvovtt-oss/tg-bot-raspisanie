@@ -3,8 +3,7 @@ from datetime import datetime, timedelta
 import html
 import os
 import re
-import shutil
-import sqlite3
+from uuid import uuid4
 from typing import Optional, Dict, Any, Tuple
 
 from aiogram import Router, F
@@ -13,16 +12,14 @@ from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
-    InlineKeyboardButton,
     ReplyKeyboardMarkup,
-    KeyboardButton,
     FSInputFile
 )
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from config import DATABASE_PATH, BACKUP_CHANNEL_ID
+from config import DATABASE_PATH
 from database import (
     init_db,
     get_user, ensure_user, set_user_group, set_user_teacher, toggle_user_notifications,
@@ -31,7 +28,9 @@ from database import (
     add_admin, remove_admin, get_admins, add_stat_admin, remove_stat_admin, get_stat_admins
 )
 from backup_service import (
-    create_safe_sqlite_backup,
+    create_safe_sqlite_backup_async,
+    remove_local_file,
+    restore_sqlite_backup_async,
     send_backup_to_channel,
     restore_database_from_channel
 )
@@ -70,7 +69,6 @@ from keyboards import (
     get_calls_keyboard,
     get_my_group_keyboard,
     get_admin_keyboard,
-    get_admin_back_keyboard,
     get_broadcast_cancel_keyboard,
     get_broadcast_finish_keyboard,
     get_broadcast_setup_keyboard,
@@ -94,8 +92,8 @@ logger = logging.getLogger(__name__)
 from premium_emoji import (
     te, strip_tg_emoji, PE_BOT, PE_CALENDAR, PE_BELL, PE_SEARCH, PE_PEOPLE, PE_INFO, PE_CHECK,
     PE_CLOCK, PE_HOUSE, PE_PERSON_CHECK, PE_TIME_PASSED, PE_STAR, PE_WARNING,
-    PE_WRITE, PE_LINK, PE_REPEAT, PE_ARROW_LEFT, PE_CROSS,
-    PE_SETTINGS, PE_LOCK_CLOSED, PE_LOCK_OPEN, PE_CHART_STATS, PE_CHART_GROW, PE_MEGAPHONE, PE_BAN,
+    PE_REPEAT, PE_CROSS,
+    PE_SETTINGS, PE_LOCK_CLOSED, PE_CHART_STATS, PE_CHART_GROW, PE_MEGAPHONE, PE_BAN,
     PE_PAPERCLIP, PE_SEND_UP, PE_FILE
 )
 
@@ -913,7 +911,9 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
 
     elif action == "bc_stats":
         text, total_pages, broadcasts = await render_broadcast_list_text(page=0)
-        kb = get_broadcast_list_keyboard(broadcasts, page=0, total_pages=total_pages)
+        kb = get_broadcast_list_keyboard(
+            broadcasts, page=0, total_pages=total_pages, is_full_admin=True
+        )
         await safe_edit_text(query.message, text, reply_markup=kb)
         await safe_query_answer(query)
 
@@ -947,10 +947,15 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
 
     elif action == "backup":
         await safe_query_answer(query, "Формирую бэкап базы данных...")
-        backup_file = create_safe_sqlite_backup()
+        backup_file = await create_safe_sqlite_backup_async()
         if backup_file and os.path.exists(backup_file):
             try:
-                await send_backup_to_channel(query.bot, caption_extra=f"Запрос из админ-панели (ID {query.from_user.id})")
+                await send_backup_to_channel(
+                    query.bot,
+                    caption_extra=f"Запрос из админ-панели (ID {query.from_user.id})",
+                    backup_file_path=backup_file,
+                    cleanup_local=False
+                )
                 stats = await get_bot_stats()
                 doc = FSInputFile(backup_file, filename="bot.db")
                 caption = (
@@ -971,7 +976,7 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
                 await safe_query_answer(query, f"Ошибка отправки бэкапа: {e}", show_alert=True)
             finally:
                 try:
-                    os.remove(backup_file)
+                    remove_local_file(backup_file)
                 except Exception:
                     pass
         else:
@@ -1030,6 +1035,23 @@ def parse_custom_scheduled_time(input_str: str) -> Tuple[Optional[datetime], Opt
     return None, "Не удалось распознать формат. Используйте <code>ЧЧ:ММ</code> (напр. <code>18:30</code>) или <code>ДД.ММ ЧЧ:ММ</code> (напр. <code>12.09 10:00</code>)."
 
 
+def render_broadcast_preview(message_html: str, limit: int = 2200) -> str:
+    """Creates a bounded, HTML-safe plain-text preview."""
+    plain_text = html.unescape(re.sub(r"<[^>]*>", "", message_html or ""))
+    escaped_parts = []
+    escaped_length = 0
+    truncated = False
+    for character in plain_text:
+        escaped_character = html.escape(character)
+        if escaped_length + len(escaped_character) > limit:
+            truncated = True
+            break
+        escaped_parts.append(escaped_character)
+        escaped_length += len(escaped_character)
+    preview = "".join(escaped_parts).rstrip()
+    return preview + "…" if truncated else preview
+
+
 def render_broadcast_setup_text(
     broadcast_text: str,
     pin_message: bool,
@@ -1055,7 +1077,7 @@ def render_broadcast_setup_text(
         f"{te(PE_MEGAPHONE)} <b>Параметры рассылки:</b>\n\n"
         f"<b>Предпросмотр сообщения:</b>\n"
         f"────────────────────\n"
-        f"{broadcast_text}\n"
+        f"{render_broadcast_preview(broadcast_text)}\n"
         f"────────────────────\n\n"
         f"{te(PE_CLOCK)} <b>Время отправки:</b> {time_label}\n"
         f"{te(PE_PAPERCLIP)} <b>Закрепление:</b> {pin_label}\n"
@@ -1066,8 +1088,8 @@ def render_broadcast_setup_text(
 
 @router.message(BotStates.waiting_for_broadcast_text)
 async def handle_broadcast_text_input(message: Message, state: FSMContext):
-    """Прием текста сообщения для рассылки администратором или стат-администратором."""
-    if not await is_stat_admin(message.from_user.id):
+    """Прием текста сообщения для рассылки полным администратором."""
+    if not await is_admin(message.from_user.id):
         await state.clear()
         return
 
@@ -1119,7 +1141,7 @@ async def handle_broadcast_text_input(message: Message, state: FSMContext):
 @router.callback_query(BroadcastCallback.filter())
 async def cb_broadcast_handler(query: CallbackQuery, callback_data: BroadcastCallback, state: FSMContext):
     """Обработчик настройки параметров и отправки рассылки."""
-    if not await is_stat_admin(query.from_user.id):
+    if not await is_admin(query.from_user.id):
         await safe_query_answer(query, "Доступ запрещен.", show_alert=True)
         return
 
@@ -1307,7 +1329,7 @@ async def cb_broadcast_handler(query: CallbackQuery, callback_data: BroadcastCal
 @router.message(BotStates.waiting_for_broadcast_daily_time)
 async def handle_broadcast_daily_time_input(message: Message, state: FSMContext):
     """Прием времени ЧЧ:ММ для ежедневной рассылки."""
-    if not await is_stat_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         await state.clear()
         return
 
@@ -1369,7 +1391,7 @@ async def handle_broadcast_daily_time_input(message: Message, state: FSMContext)
 @router.message(BotStates.waiting_for_broadcast_custom_time)
 async def handle_broadcast_custom_time_input(message: Message, state: FSMContext):
     """Прием ручного ввода времени для однократной запланированной рассылки."""
-    if not await is_stat_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         await state.clear()
         return
 
@@ -1430,6 +1452,7 @@ async def render_stat_admin_menu_text() -> str:
         f"{te(PE_CHART_GROW)} <b>Активных пользователей за 24 часа:</b> <code>{stats['active_today']}</code>\n\n"
         f"{te(PE_MEGAPHONE)} <b>Успешно завершено рассылок:</b> <code>{bc_summary['completed']}</code>\n"
         f"{te(PE_CLOCK)} <b>Запланировано отложенных рассылок:</b> <code>{bc_summary['scheduled']}</code>\n"
+        f"{te(PE_WARNING)} <b>Прервано с ошибкой:</b> <code>{bc_summary['failed']}</code>\n"
         f"{te(PE_CHECK)} <b>Суммарно доставлено сообщений:</b> <code>{bc_summary['sum_sent']}</code>\n\n"
         f"<i>Выберите нужный раздел для подробного просмотра:</i>"
     )
@@ -1473,7 +1496,8 @@ async def render_broadcast_list_text(page: int = 0) -> Tuple[str, int, list]:
         f"{te(PE_MEGAPHONE)} <b>История и статистика рассылок</b>\n\n"
         f"{te(PE_CHECK)} Завершено: <b>{summary['completed']}</b> | "
         f"{te(PE_CLOCK)} Запланировано: <b>{summary['scheduled']}</b> | "
-        f"{te(PE_CROSS)} Отменено: <b>{summary['cancelled']}</b>\n"
+        f"{te(PE_CROSS)} Отменено: <b>{summary['cancelled']}</b> | "
+        f"{te(PE_WARNING)} Ошибок: <b>{summary['failed']}</b>\n"
         f"{te(PE_SEND_UP)} Всего доставлено сообщений: <b>{summary['sum_sent']}</b>\n\n"
         f"Страница <b>{page + 1}</b> из <b>{total_pages}</b> (всего рассылок: {total_count}):\n"
         f"<i>Нажмите на рассылку ниже, чтобы открыть карточку с подробностями:</i>"
@@ -1514,6 +1538,8 @@ def render_broadcast_detail_text(bc: Dict[str, Any]) -> str:
         status_line = f"{te(PE_REPEAT)} <b>В процессе доставки...</b>"
     elif status == "cancelled":
         status_line = f"{te(PE_CROSS)} <b>Отменена администратором</b>"
+    elif status == "failed":
+        status_line = f"{te(PE_WARNING)} <b>Прервана из-за ошибки или перезапуска</b>"
     else:
         status_line = f"{te(PE_INFO)} <b>{status}</b>"
 
@@ -1524,9 +1550,7 @@ def render_broadcast_detail_text(bc: Dict[str, Any]) -> str:
     else:
         time_line = "Отправка: <i>Сразу</i>"
 
-    msg_preview = bc.get("message_text") or ""
-    if len(msg_preview) > 600:
-        msg_preview = msg_preview[:600] + "..."
+    msg_preview = render_broadcast_preview(bc.get("message_text") or "", limit=600)
 
     return (
         f"{te(PE_MEGAPHONE)} <b>Детальная статистика рассылки #{bc_id}</b>\n\n"
@@ -1585,11 +1609,16 @@ async def cb_stat_admin_handler(query: CallbackQuery, callback_data: StatAdminCa
     elif action == "broadcast_list":
         page = callback_data.page
         text, total_pages, broadcasts = await render_broadcast_list_text(page)
-        kb = get_broadcast_list_keyboard(broadcasts, page, total_pages)
+        kb = get_broadcast_list_keyboard(
+            broadcasts, page, total_pages, is_full_admin=is_full
+        )
         await safe_edit_text(query.message, text, reply_markup=kb)
         await safe_query_answer(query)
 
     elif action == "create_broadcast":
+        if not is_full:
+            await safe_query_answer(query, "Доступ запрещен.", show_alert=True)
+            return
         await state.set_state(BotStates.waiting_for_broadcast_text)
         text = (
             f"{te(PE_MEGAPHONE)} <b>Создание новой рассылки</b>\n\n"
@@ -1612,11 +1641,16 @@ async def cb_stat_admin_handler(query: CallbackQuery, callback_data: StatAdminCa
 
         text = render_broadcast_detail_text(bc)
         is_scheduled = (bc.get("status") == "scheduled")
-        kb = get_broadcast_detail_keyboard(bc_id, is_scheduled, page=page)
+        kb = get_broadcast_detail_keyboard(
+            bc_id, is_scheduled, page=page, can_cancel=is_full
+        )
         await safe_edit_text(query.message, text, reply_markup=kb)
         await safe_query_answer(query)
 
     elif action == "broadcast_cancel":
+        if not is_full:
+            await safe_query_answer(query, "Доступ запрещен.", show_alert=True)
+            return
         bc_id = callback_data.bc_id
         page = callback_data.page
         cancelled = await cancel_broadcast(bc_id)
@@ -1628,15 +1662,25 @@ async def cb_stat_admin_handler(query: CallbackQuery, callback_data: StatAdminCa
         bc = await get_broadcast(bc_id)
         if bc:
             text = render_broadcast_detail_text(bc)
-            kb = get_broadcast_detail_keyboard(bc_id, is_scheduled=False, page=page)
+            kb = get_broadcast_detail_keyboard(
+                bc_id, is_scheduled=False, page=page, can_cancel=is_full
+            )
             await safe_edit_text(query.message, text, reply_markup=kb)
 
     elif action == "backup":
+        if not is_full:
+            await safe_query_answer(query, "Доступ запрещен.", show_alert=True)
+            return
         await safe_query_answer(query, "Формирую бэкап базы данных...")
-        backup_file = create_safe_sqlite_backup()
+        backup_file = await create_safe_sqlite_backup_async()
         if backup_file and os.path.exists(backup_file):
             try:
-                await send_backup_to_channel(query.bot, caption_extra=f"Запрос от стат-администратора (ID {query.from_user.id})")
+                await send_backup_to_channel(
+                    query.bot,
+                    caption_extra=f"Запрос администратора (ID {query.from_user.id})",
+                    backup_file_path=backup_file,
+                    cleanup_local=False
+                )
                 stats = await get_bot_stats()
                 doc = FSInputFile(backup_file, filename="bot.db")
                 caption = (
@@ -1657,7 +1701,7 @@ async def cb_stat_admin_handler(query: CallbackQuery, callback_data: StatAdminCa
                 await safe_query_answer(query, f"Ошибка отправки бэкапа: {e}", show_alert=True)
             finally:
                 try:
-                    os.remove(backup_file)
+                    remove_local_file(backup_file)
                 except Exception:
                     pass
         else:
@@ -1762,17 +1806,20 @@ async def cmd_admins_list(message: Message):
 @router.message(Command("backup"), StateFilter("*"))
 async def cmd_backup(message: Message):
     """Ручное создание резервной копии базы данных."""
-    if not await is_stat_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         return
 
     status_msg = await safe_answer(message, f"{te(PE_CLOCK)} Формирую резервную копию базы данных...")
 
-    # Отправляем в Telegram-канал (если настроен)
-    await send_backup_to_channel(message.bot, caption_extra=f"Ручной бэкап от пользователя {message.from_user.id}")
-
-    backup_file = create_safe_sqlite_backup()
+    backup_file = await create_safe_sqlite_backup_async()
     if backup_file and os.path.exists(backup_file):
         try:
+            await send_backup_to_channel(
+                message.bot,
+                caption_extra=f"Ручной бэкап администратора {message.from_user.id}",
+                backup_file_path=backup_file,
+                cleanup_local=False
+            )
             stats = await get_bot_stats()
             doc = FSInputFile(backup_file, filename="bot.db")
             caption = (
@@ -1797,7 +1844,7 @@ async def cmd_backup(message: Message):
                     pass
         finally:
             try:
-                os.remove(backup_file)
+                remove_local_file(backup_file)
             except Exception:
                 pass
     else:
@@ -1847,37 +1894,17 @@ async def handle_db_document_upload(message: Message):
         return
 
     doc = message.document
-    if not doc or not (doc.file_name and doc.file_name.endswith((".db", ".sqlite", ".sqlite3"))):
+    if not doc or not (doc.file_name and doc.file_name.lower().endswith((".db", ".sqlite", ".sqlite3"))):
         return
 
     status_msg = await safe_answer(message, f"{te(PE_CLOCK)} Проверяю файл базы данных <code>{html.escape(doc.file_name)}</code>...")
-    temp_path = str(DATABASE_PATH) + ".uploaded_temp"
+    temp_path = str(DATABASE_PATH) + f".{uuid4().hex}.uploaded_temp"
 
     try:
         await message.bot.download(doc.file_id, destination=temp_path)
 
-        # Проверяем целостность и таблицу users
-        conn = sqlite3.connect(temp_path)
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT count(*) FROM users")
-            user_count = cursor.fetchone()[0]
-        finally:
-            conn.close()
-
-        # Безопасно обновляем рабочую базу данных через SQLite Online Backup API
-        src_conn = sqlite3.connect(temp_path)
-        dst_conn = sqlite3.connect(DATABASE_PATH)
-        try:
-            src_conn.backup(dst_conn)
-        finally:
-            dst_conn.close()
-            src_conn.close()
-
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
+        user_count = await restore_sqlite_backup_async(temp_path, DATABASE_PATH)
+        remove_local_file(temp_path)
 
         await init_db()
 
@@ -1895,11 +1922,7 @@ async def handle_db_document_upload(message: Message):
             await safe_answer(message, success_text)
 
     except Exception as e:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
+        remove_local_file(temp_path)
         fail_text = (
             f"{te(PE_CROSS)} <b>Ошибка при восстановлении базы данных:</b>\n"
             f"<code>{html.escape(str(e))}</code>\n\n"

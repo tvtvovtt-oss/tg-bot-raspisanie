@@ -1,14 +1,14 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
-
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 from database import (
     get_broadcast,
     get_due_scheduled_broadcasts,
+    claim_broadcast,
+    fail_broadcast_if_in_progress,
     update_broadcast_status,
     get_all_user_ids,
     get_admins
@@ -23,22 +23,71 @@ SEND_DELAY_SECONDS = 0.04
 CHECK_INTERVAL_SECONDS = 15
 
 
+async def _send_broadcast_message(bot: Bot, user_id: int, message_text: str):
+    """Sends one message with HTML fallback and bounded flood-control retries."""
+    text = message_text
+    fallback_used = False
+    for attempt in range(3):
+        try:
+            message = await bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+            return message, "sent"
+        except TelegramRetryAfter as exc:
+            if attempt == 2:
+                logger.warning("Telegram rate limit persisted for user %s", user_id)
+                return None, "failed"
+            await asyncio.sleep(max(float(exc.retry_after), 0.1) + 0.1)
+        except TelegramForbiddenError:
+            return None, "blocked"
+        except TelegramBadRequest as exc:
+            if not fallback_used:
+                clean_text = strip_tg_emoji(text)
+                if clean_text != text:
+                    text = clean_text
+                    fallback_used = True
+                    continue
+            logger.warning("Ошибка отправки сообщения пользователю %s: %s", user_id, exc)
+            return None, "failed"
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if "forbidden" in error_text or "blocked" in error_text or "chat not found" in error_text:
+                return None, "blocked"
+            logger.warning("Ошибка отправки сообщения пользователю %s: %s", user_id, exc)
+            return None, "failed"
+    return None, "failed"
+
+
 async def execute_broadcast(bot: Bot, broadcast_id: int):
-    """
-    Выполняет рассылку сообщений всем пользователям бота.
-    Поддерживает закрепление сообщений (pin), подсчет статистики и отправку отчета автору.
-    """
+    """Claims and executes a broadcast, recording unexpected interruptions."""
     bc = await get_broadcast(broadcast_id)
     if not bc:
         logger.error(f"Рассылка #{broadcast_id} не найдена в базе данных.")
         return
 
-    if bc["status"] in ("in_progress", "completed", "cancelled"):
-        logger.info(f"Рассылка #{broadcast_id} пропущена: статус {bc['status']}.")
+    if not await claim_broadcast(broadcast_id):
+        logger.info(f"Рассылка #{broadcast_id} уже запущена, завершена или отменена.")
         return
 
-    # Переводим статус в in_progress
-    await update_broadcast_status(broadcast_id, status="in_progress")
+    try:
+        await _deliver_broadcast(bot, broadcast_id, bc)
+    except asyncio.CancelledError:
+        await fail_broadcast_if_in_progress(broadcast_id)
+        logger.warning("Рассылка #%s прервана при остановке процесса.", broadcast_id)
+        raise
+    except Exception:
+        await fail_broadcast_if_in_progress(broadcast_id)
+        logger.exception("Рассылка #%s аварийно завершилась.", broadcast_id)
+
+
+async def _deliver_broadcast(bot: Bot, broadcast_id: int, bc: dict):
+    """
+    Выполняет рассылку сообщений всем пользователям бота.
+    Поддерживает закрепление сообщений (pin), подсчет статистики и отправку отчета автору.
+    """
     logger.info(f"Запуск рассылки #{broadcast_id}...")
 
     user_ids = await get_all_user_ids()
@@ -52,37 +101,13 @@ async def execute_broadcast(bot: Bot, broadcast_id: int):
     failed = 0
 
     for uid in user_ids:
-        sent_msg = None
-        try:
-            sent_msg = await bot.send_message(
-                chat_id=uid,
-                text=msg_text,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
+        sent_msg, outcome = await _send_broadcast_message(bot, uid, msg_text)
+        if outcome == "sent":
             sent += 1
-        except TelegramBadRequest:
-            try:
-                # Фолбэк на текст без кастомных эмодзи в случае ошибки парсера Telegram
-                sent_msg = await bot.send_message(
-                    chat_id=uid,
-                    text=strip_tg_emoji(msg_text),
-                    parse_mode="HTML",
-                    disable_web_page_preview=True
-                )
-                sent += 1
-            except Exception as e2:
-                logger.warning(f"Ошибка отправки сообщения пользователю {uid}: {e2}")
-                failed += 1
-        except TelegramForbiddenError:
+        elif outcome == "blocked":
             blocked += 1
-        except Exception as e:
-            err = str(e).lower()
-            if "forbidden" in err or "blocked" in err or "chat not found" in err:
-                blocked += 1
-            else:
-                logger.warning(f"Сбой отправки рассылки #{broadcast_id} пользователю {uid}: {e}")
-                failed += 1
+        else:
+            failed += 1
 
         # Закрепляем сообщение, если включена опция
         if pin_message and sent_msg:

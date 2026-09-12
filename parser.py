@@ -8,10 +8,9 @@ from bs4 import BeautifulSoup
 
 from config import ALMETPT_BASE_URL
 from premium_emoji import (
-    te, PE_CALENDAR, PE_CLOCK, PE_BELL, PE_PEOPLE, PE_SEARCH,
-    PE_HOUSE, PE_ARROW_LEFT, PE_REPEAT, PE_LINK,
-    PE_PERSON_CHECK, PE_INFO, PE_CHECK, PE_PARTY, PE_WARNING,
-    PE_GEOTAG, PE_STAR, PE_TIME_PASSED, PE_MEGAPHONE
+    te, PE_CALENDAR, PE_CLOCK, PE_BELL, PE_PEOPLE,
+    PE_PERSON_CHECK, PE_INFO, PE_PARTY, PE_WARNING,
+    PE_STAR, PE_TIME_PASSED, PE_MEGAPHONE
 )
 
 # Caching containers
@@ -54,6 +53,18 @@ LATIN_LOOKALIKES = str.maketrans({
 def normalize_string(s: str) -> str:
     """Normalizes string for search: lowercase, remove dashes, spaces, dots."""
     return re.sub(r"[\s\-_.\(\)]+", "", s.lower())
+
+
+def infer_course_from_group_name(name: str, reference_date: Optional[datetime] = None) -> Optional[int]:
+    """Infers course from admission year using the current academic year."""
+    match = re.search(r"[-](\d{2})(?:\D|$)", name)
+    if not match:
+        return None
+    reference_date = reference_date or datetime.now()
+    academic_start_year = reference_date.year if reference_date.month >= 8 else reference_date.year - 1
+    admission_year = 2000 + int(match.group(1))
+    course = academic_start_year - admission_year + 1
+    return course if 1 <= course <= 4 else None
 
 
 def decode_response_text(resp: httpx.Response) -> str:
@@ -322,15 +333,7 @@ async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
                                 pass
 
                         if course_val is None:
-                            m_yr = re.search(r"[-](\d{2})", name)
-                            if m_yr:
-                                try:
-                                    yr = int(m_yr.group(1))
-                                    calc_c = 2026 - (2000 + yr) + 1
-                                    if 1 <= calc_c <= 4:
-                                        course_val = calc_c
-                                except Exception:
-                                    pass
+                            course_val = infer_course_from_group_name(name)
 
                         if course_val is None:
                             k = val.get("Kurs")
@@ -1103,8 +1106,11 @@ def parse_pair_times(time_str: str) -> Tuple[Optional[str], Optional[str], Optio
         h1, m1, h2, m2 = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
         t1_str = f"{h1:02d}:{m1:02d}"
         t2_str = f"{h2:02d}:{m2:02d}"
-        dt1 = datetime(2000, 1, 1, h1, m1)
-        dt2 = datetime(2000, 1, 1, h2, m2)
+        try:
+            dt1 = datetime(2000, 1, 1, h1, m1)
+            dt2 = datetime(2000, 1, 1, h2, m2)
+        except ValueError:
+            return t1_str, t2_str, None, None
         return t1_str, t2_str, dt1, dt2
     return None, None, None, None
 

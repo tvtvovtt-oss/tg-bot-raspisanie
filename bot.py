@@ -4,18 +4,16 @@ import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
-from config import BOT_TOKEN, PROXY_URL, ENABLE_NOTIFICATIONS, BACKUP_CHANNEL_ID
-from database import init_db
+from config import BOT_TOKEN, ENABLE_NOTIFICATIONS, BACKUP_CHANNEL_ID
 from handlers import router
 from parser import get_groups, get_available_dates
 from notifier import schedule_notification_worker
 from broadcast_service import broadcast_scheduler_worker
 from backup_service import auto_restore_if_needed, backup_scheduler_worker, send_backup_to_channel
-from middlewares import MaintenanceMiddleware
+from middlewares import MaintenanceMiddleware, UserActivityMiddleware
 
 # Configure logging
 logging.basicConfig(
@@ -41,17 +39,9 @@ async def set_bot_commands(bot: Bot):
 
 
 async def main():
-    # Set up session (with proxy if provided)
-    if PROXY_URL:
-        logger.info(f"Используется прокси для Telegram API: {PROXY_URL}")
-        session = AiohttpSession(proxy=PROXY_URL)
-    else:
-        session = None
-
     logger.info("Создание экземпляра Telegram-бота...")
     bot = Bot(
         token=BOT_TOKEN,
-        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
 
@@ -67,6 +57,8 @@ async def main():
         logger.warning(f"Ошибка при предварительной загрузке: {e}")
 
     dp = Dispatcher()
+    dp.message.outer_middleware(UserActivityMiddleware())
+    dp.callback_query.outer_middleware(UserActivityMiddleware())
     dp.message.outer_middleware(MaintenanceMiddleware())
     dp.callback_query.outer_middleware(MaintenanceMiddleware())
     dp.include_router(router)
@@ -95,14 +87,14 @@ async def main():
 
     logger.info("Бот успешно запущен и готов к работе!")
     try:
-        await dp.start_polling(bot)
+        # Keep the session alive until the final backup has been sent below.
+        await dp.start_polling(bot, close_bot_session=False)
     finally:
-        if notifier_task:
-            notifier_task.cancel()
-        if broadcast_task:
-            broadcast_task.cancel()
-        if backup_task:
-            backup_task.cancel()
+        background_tasks = [task for task in (notifier_task, broadcast_task, backup_task) if task]
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
         try:
             if BACKUP_CHANNEL_ID:
                 logger.info("Сохранение финального бэкапа перед завершением работы...")
