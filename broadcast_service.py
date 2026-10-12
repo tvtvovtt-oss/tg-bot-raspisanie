@@ -11,7 +11,9 @@ from database import (
     fail_broadcast_if_in_progress,
     update_broadcast_status,
     get_all_user_ids,
-    get_admins
+    get_admins,
+    mark_user_blocked,
+    next_daily_run_str
 )
 from premium_emoji import te, PE_MEGAPHONE, PE_CHECK, PE_BAN, PE_WARNING, PE_PEOPLE, PE_PAPERCLIP, strip_tg_emoji
 
@@ -75,12 +77,24 @@ async def execute_broadcast(bot: Bot, broadcast_id: int):
     try:
         await _deliver_broadcast(bot, broadcast_id, bc)
     except asyncio.CancelledError:
-        await fail_broadcast_if_in_progress(broadcast_id)
+        await _recover_interrupted_broadcast(broadcast_id, bc)
         logger.warning("Рассылка #%s прервана при остановке процесса.", broadcast_id)
         raise
     except Exception:
-        await fail_broadcast_if_in_progress(broadcast_id)
+        await _recover_interrupted_broadcast(broadcast_id, bc)
         logger.exception("Рассылка #%s аварийно завершилась.", broadcast_id)
+
+
+async def _recover_interrupted_broadcast(broadcast_id: int, bc: dict):
+    """A daily broadcast is rescheduled for tomorrow; a one-off one is marked failed."""
+    if bc.get("repeat_type") == "daily":
+        await update_broadcast_status(
+            broadcast_id=broadcast_id,
+            status="scheduled",
+            scheduled_at=next_daily_run_str(bc.get("repeat_time"))
+        )
+    else:
+        await fail_broadcast_if_in_progress(broadcast_id)
 
 
 async def _deliver_broadcast(bot: Bot, broadcast_id: int, bc: dict):
@@ -106,6 +120,8 @@ async def _deliver_broadcast(bot: Bot, broadcast_id: int, bc: dict):
             sent += 1
         elif outcome == "blocked":
             blocked += 1
+            # Stop targeting this user in future broadcasts until they write to the bot again
+            await mark_user_blocked(uid)
         else:
             failed += 1
 

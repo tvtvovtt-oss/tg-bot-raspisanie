@@ -13,6 +13,7 @@ from database import (
     is_user_notified,
     mark_user_notified,
     disable_user_notifications,
+    mark_user_blocked,
     is_maintenance_mode
 )
 from parser import (
@@ -192,6 +193,7 @@ async def check_and_notify_users(bot: Bot):
                     elif outcome == "blocked":
                         logger.info("Пользователь %s заблокировал бота; уведомления отключены.", u_id)
                         await disable_user_notifications(u_id)
+                        await mark_user_blocked(u_id)
 
         # 2. Process teacher schedules
         for t_id, teacher_users in teachers_map.items():
@@ -232,6 +234,7 @@ async def check_and_notify_users(bot: Bot):
                     elif outcome == "blocked":
                         logger.info("Пользователь %s заблокировал бота; уведомления отключены.", u_id)
                         await disable_user_notifications(u_id)
+                        await mark_user_blocked(u_id)
 
     except Exception as e:
         logger.error(f"Ошибка в цикле проверки расписания: {e}", exc_info=True)

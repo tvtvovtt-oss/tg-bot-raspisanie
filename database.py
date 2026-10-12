@@ -13,6 +13,17 @@ _ADMIN_IDS_CACHE: Optional[Set[int]] = None
 _STAT_ADMIN_IDS_CACHE: Optional[Set[int]] = None
 
 
+def next_daily_run_str(repeat_time: Optional[str], now: Optional[datetime] = None) -> str:
+    """Returns the next occurrence (tomorrow at HH:MM) of a daily broadcast."""
+    now = now or datetime.now()
+    try:
+        rh, rm = map(int, (repeat_time or "07:00").split(":"))
+    except ValueError:
+        rh, rm = 7, 0
+    next_dt = (now + timedelta(days=1)).replace(hour=rh, minute=rm, second=0, microsecond=0)
+    return next_dt.strftime("%Y-%m-%d %H:%M:00")
+
+
 async def init_db(recover_interrupted: bool = False):
     global _MAINTENANCE_CACHE, _ADMIN_IDS_CACHE, _STAT_ADMIN_IDS_CACHE
 
@@ -57,7 +68,8 @@ async def init_db(recover_interrupted: bool = False):
             "teacher_id": "TEXT",
             "teacher_name": "TEXT",
             "notifications": "INTEGER DEFAULT 1",
-            "updated_at": "TIMESTAMP"
+            "updated_at": "TIMESTAMP",
+            "blocked_bot": "INTEGER DEFAULT 0"
         }
         for col_name, col_type in col_defs.items():
             if col_name not in existing_cols:
@@ -137,13 +149,25 @@ async def init_db(recover_interrupted: bool = False):
             pass
 
         if recover_interrupted:
-            # A process can stop in the middle of a delivery. Such broadcasts
-            # cannot be resumed safely without per-recipient delivery state.
-            await db.execute("""
-                UPDATE broadcasts
-                SET status = 'failed', completed_at = COALESCE(completed_at, datetime('now', 'localtime'))
-                WHERE status = 'in_progress'
-            """)
+            # A process can stop in the middle of a delivery. One-off broadcasts
+            # cannot be resumed safely, so they are failed. Daily broadcasts are
+            # rescheduled, otherwise the repeat would silently stop forever.
+            async with db.execute(
+                "SELECT id, repeat_type, repeat_time FROM broadcasts WHERE status = 'in_progress'"
+            ) as cursor:
+                interrupted = await cursor.fetchall()
+            for bc_id, repeat_type, repeat_time in interrupted:
+                if repeat_type == "daily":
+                    await db.execute(
+                        "UPDATE broadcasts SET status = 'scheduled', scheduled_at = ? WHERE id = ?",
+                        (next_daily_run_str(repeat_time), bc_id)
+                    )
+                else:
+                    await db.execute("""
+                        UPDATE broadcasts
+                        SET status = 'failed', completed_at = COALESCE(completed_at, datetime('now', 'localtime'))
+                        WHERE id = ?
+                    """, (bc_id,))
 
         # Clean up any mistakenly recorded future dates so users will receive the real notifications once published
         try:
@@ -205,14 +229,23 @@ async def ensure_user(
     """Регистрирует пользователя при первом обращении, если его ещё нет в базе."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         now = datetime.now().isoformat()
+        # Any update from the user means the bot is reachable again.
         await db.execute("""
-            INSERT INTO users (user_id, username, first_name, updated_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO users (user_id, username, first_name, updated_at, blocked_bot)
+            VALUES (?, ?, ?, ?, 0)
             ON CONFLICT(user_id) DO UPDATE SET
                 username = COALESCE(excluded.username, users.username),
                 first_name = COALESCE(excluded.first_name, users.first_name),
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                blocked_bot = 0
         """, (user_id, username, first_name, now))
+        await db.commit()
+
+
+async def mark_user_blocked(user_id: int):
+    """Remembers that the user blocked the bot so broadcasts stop targeting them."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("UPDATE users SET blocked_bot = 1 WHERE user_id = ?", (user_id,))
         await db.commit()
 
 
@@ -288,6 +321,7 @@ async def get_users_for_notifications() -> list:
             SELECT user_id, username, first_name, group_id, group_name, teacher_id, teacher_name
             FROM users
             WHERE (notifications IS NULL OR notifications = 1)
+              AND COALESCE(blocked_bot, 0) = 0
               AND ((group_id IS NOT NULL AND group_id != '') OR (teacher_id IS NOT NULL AND teacher_id != ''))
         """
         async with db.execute(query) as cursor:
@@ -564,9 +598,9 @@ async def get_bot_stats() -> Dict[str, Any]:
 
 
 async def get_all_user_ids() -> List[int]:
-    """Возвращает список ID всех пользователей для рассылки."""
+    """Возвращает список ID всех пользователей для рассылки (кроме заблокировавших бота)."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute("SELECT user_id FROM users") as c:
+        async with db.execute("SELECT user_id FROM users WHERE COALESCE(blocked_bot, 0) = 0") as c:
             rows = await c.fetchall()
             return [r[0] for r in rows]
 
