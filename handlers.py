@@ -726,7 +726,7 @@ async def process_teacher_search_state(message: Message, state: FSMContext):
     )
 
 
-@router.message(F.text)
+@router.message(StateFilter(None), F.text)
 async def process_any_text(message: Message, state: FSMContext):
     """Если пользователь просто прислал сообщение в чат."""
     text = message.text.strip()
