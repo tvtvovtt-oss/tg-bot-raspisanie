@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 from aiogram.types import (
     ReplyKeyboardMarkup,
@@ -6,6 +7,9 @@ from aiogram.types import (
     InlineKeyboardButton
 )
 from aiogram.filters.callback_data import CallbackData
+
+from config import MAX_LIST_BUTTONS
+from timeutil import now_local, today_local_str
 
 from premium_emoji import (
     PE_CALENDAR, PE_TIME_PASSED, PE_BELL, PE_PEOPLE, PE_SEARCH,
@@ -182,9 +186,8 @@ def format_date_button_label(dt_str: str, today_str: Optional[str] = None) -> st
     - '07.09 (Пн)' (архивный день)
     """
     try:
-        from datetime import datetime
         dt = datetime.strptime(dt_str, "%Y-%m-%d")
-        t_dt = datetime.strptime(today_str, "%Y-%m-%d") if today_str else datetime.now()
+        t_dt = datetime.strptime(today_str, "%Y-%m-%d") if today_str else now_local()
         diff = (dt.date() - t_dt.date()).days
         wd = WEEKDAYS_SHORT[dt.weekday()]
         day_str = f"{dt.day:02d}.{dt.month:02d}"
@@ -216,12 +219,12 @@ def get_dates_inline_keyboard(
                 today_str = d.get("date")
                 break
     if not today_str:
-        from datetime import datetime
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_str = today_local_str()
 
     buttons: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
-    for d in dates:
+    # Ближайшие даты идут первыми; архив обрезается, чтобы уложиться в лимит кнопок Telegram.
+    for d in dates[:MAX_LIST_BUTTONS]:
         dt = d["date"]
         label = format_date_button_label(dt, today_str)
 
@@ -297,8 +300,8 @@ def get_groups_search_inline_keyboard(
     """Список найденных групп в виде сетки кнопок (по 2 в ряд) + Главное меню."""
     buttons: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
-    for g in groups[:50]:
-        name = g.get("out_name") or g.get("name")
+    for g in groups[:MAX_LIST_BUTTONS]:
+        name = g.get("out_name") or g.get("name") or "Группа"
         btn = InlineKeyboardButton(
             text=name,
             icon_custom_emoji_id=PE_PEOPLE,
@@ -357,8 +360,8 @@ def get_teachers_search_inline_keyboard(
 ) -> InlineKeyboardMarkup:
     """Список преподавателей с премиум-иконками (без дефолт-эмодзи в тексте)."""
     buttons: List[List[InlineKeyboardButton]] = []
-    for t in teachers[:25]:
-        fio = t.get("short_fio") or t.get("fio")
+    for t in teachers[:MAX_LIST_BUTTONS]:
+        fio = t.get("short_fio") or t.get("fio") or "Преподаватель"
         buttons.append([
             InlineKeyboardButton(
                 text=fio,
@@ -574,19 +577,6 @@ def get_admin_keyboard(is_maintenance: bool) -> InlineKeyboardMarkup:
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-def get_admin_back_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура возврата в админ-панель."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="Назад в админ-панель",
-                icon_custom_emoji_id=PE_ARROW_LEFT,
-                callback_data=AdminCallback(action="panel").pack()
-            )
-        ]
-    ])
 
 
 def get_broadcast_cancel_keyboard(is_full_admin: bool = True) -> InlineKeyboardMarkup:

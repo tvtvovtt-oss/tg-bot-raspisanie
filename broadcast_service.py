@@ -1,8 +1,9 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import Coroutine, Set
+
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 from database import (
     get_broadcast,
@@ -13,9 +14,12 @@ from database import (
     get_all_user_ids,
     get_admins,
     mark_user_blocked,
-    next_daily_run_str
+    next_daily_run_str,
+    is_restore_in_progress
 )
-from premium_emoji import te, PE_MEGAPHONE, PE_CHECK, PE_BAN, PE_WARNING, PE_PEOPLE, PE_PAPERCLIP, strip_tg_emoji
+from delivery import send_with_retry, SENT, BLOCKED
+from premium_emoji import te, PE_MEGAPHONE, PE_CHECK, PE_BAN, PE_WARNING, PE_PEOPLE, PE_PAPERCLIP
+from timeutil import now_local
 
 logger = logging.getLogger(__name__)
 
@@ -24,43 +28,30 @@ SEND_DELAY_SECONDS = 0.04
 # Интервал проверки запланированных рассылок (в секундах)
 CHECK_INTERVAL_SECONDS = 15
 
+# Сильные ссылки на фоновые рассылки: без них asyncio может собрать задачу сборщиком мусора.
+_BACKGROUND_TASKS: Set[asyncio.Task] = set()
+
+
+def spawn_background(coro: Coroutine) -> asyncio.Task:
+    """Запускает корутину в фоне и хранит ссылку на задачу до её завершения."""
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
+async def cancel_background_tasks() -> None:
+    """Останавливает выполняющиеся рассылки; каждая при отмене сама фиксирует своё состояние в БД."""
+    tasks = list(_BACKGROUND_TASKS)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
 
 async def _send_broadcast_message(bot: Bot, user_id: int, message_text: str):
     """Sends one message with HTML fallback and bounded flood-control retries."""
-    text = message_text
-    fallback_used = False
-    for attempt in range(3):
-        try:
-            message = await bot.send_message(
-                chat_id=user_id,
-                text=text,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
-            return message, "sent"
-        except TelegramRetryAfter as exc:
-            if attempt == 2:
-                logger.warning("Telegram rate limit persisted for user %s", user_id)
-                return None, "failed"
-            await asyncio.sleep(max(float(exc.retry_after), 0.1) + 0.1)
-        except TelegramForbiddenError:
-            return None, "blocked"
-        except TelegramBadRequest as exc:
-            if not fallback_used:
-                clean_text = strip_tg_emoji(text)
-                if clean_text != text:
-                    text = clean_text
-                    fallback_used = True
-                    continue
-            logger.warning("Ошибка отправки сообщения пользователю %s: %s", user_id, exc)
-            return None, "failed"
-        except Exception as exc:
-            error_text = str(exc).lower()
-            if "forbidden" in error_text or "blocked" in error_text or "chat not found" in error_text:
-                return None, "blocked"
-            logger.warning("Ошибка отправки сообщения пользователю %s: %s", user_id, exc)
-            return None, "failed"
-    return None, "failed"
+    return await send_with_retry(bot, user_id, message_text, parse_mode="HTML")
 
 
 async def execute_broadcast(bot: Bot, broadcast_id: int):
@@ -116,9 +107,9 @@ async def _deliver_broadcast(bot: Bot, broadcast_id: int, bc: dict):
 
     for uid in user_ids:
         sent_msg, outcome = await _send_broadcast_message(bot, uid, msg_text)
-        if outcome == "sent":
+        if outcome == SENT:
             sent += 1
-        elif outcome == "blocked":
+        elif outcome == BLOCKED:
             blocked += 1
             # Stop targeting this user in future broadcasts until they write to the bot again
             await mark_user_blocked(uid)
@@ -139,18 +130,13 @@ async def _deliver_broadcast(bot: Bot, broadcast_id: int, bc: dict):
         await asyncio.sleep(SEND_DELAY_SECONDS)
 
     # Фиксируем завершение рассылки в БД
-    completed_at_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    completed_at_str = now_local().strftime("%Y-%m-%d %H:%M:%S")
     is_daily = (bc.get("repeat_type") == "daily")
-    repeat_time_str = bc.get("repeat_time") or "07:00"
+    next_scheduled_str = ""
 
     if is_daily:
         # Для ежедневной рассылки переносим следующее выполнение на завтра
-        try:
-            rh, rm = map(int, repeat_time_str.split(":"))
-        except Exception:
-            rh, rm = 7, 0
-        tomorrow_dt = (datetime.now() + timedelta(days=1)).replace(hour=rh, minute=rm, second=0, microsecond=0)
-        next_scheduled_str = tomorrow_dt.strftime("%Y-%m-%d %H:%M:00")
+        next_scheduled_str = next_daily_run_str(bc.get("repeat_time"))
 
         await update_broadcast_status(
             broadcast_id=broadcast_id,
@@ -184,8 +170,9 @@ async def _deliver_broadcast(bot: Bot, broadcast_id: int, bc: dict):
     pin_status_str = "Да (закреплено)" if pin_message else "Нет"
 
     if is_daily:
+        next_dt = datetime.strptime(next_scheduled_str, "%Y-%m-%d %H:%M:%S")
         report_header = f"{te(PE_MEGAPHONE)} <b>Отчёт: ежедневная рассылка #{broadcast_id}</b>"
-        next_line = f"{te(PE_WARNING)} <b>Следующая отправка:</b> <code>{tomorrow_dt.strftime('%d.%m.%Y в %H:%M')}</code>\n<i>Для отмены повторов перейдите в меню статистики рассылок (/statadmin).</i>\n\n"
+        next_line = f"{te(PE_WARNING)} <b>Следующая отправка:</b> <code>{next_dt.strftime('%d.%m.%Y в %H:%M')}</code>\n<i>Для отмены повторов перейдите в меню статистики рассылок (/statadmin).</i>\n\n"
     else:
         report_header = f"{te(PE_MEGAPHONE)} <b>Отчёт о завершении рассылки #{broadcast_id}</b>"
         next_line = ""
@@ -227,11 +214,13 @@ async def broadcast_scheduler_worker(bot: Bot):
     logger.info("Фоновый планировщик отложенных рассылок запущен.")
     while True:
         try:
-            due_broadcasts = await get_due_scheduled_broadcasts()
-            for bc in due_broadcasts:
-                logger.info(f"Наступило время выполнения запланированной рассылки #{bc['id']} ({bc.get('scheduled_at')}). Запуск...")
-                # Запускаем рассылку в отдельном фоновом таске, чтобы не блокировать цикл
-                asyncio.create_task(execute_broadcast(bot, bc["id"]))
+            # Пока восстанавливается база, рассылки не запускаем: они читают и пишут в неё.
+            if not is_restore_in_progress():
+                due_broadcasts = await get_due_scheduled_broadcasts()
+                for bc in due_broadcasts:
+                    logger.info(f"Наступило время выполнения запланированной рассылки #{bc['id']} ({bc.get('scheduled_at')}). Запуск...")
+                    # Запускаем рассылку в отдельном фоновом таске, чтобы не блокировать цикл
+                    spawn_background(execute_broadcast(bot, bc["id"]))
         except asyncio.CancelledError:
             logger.info("Планировщик отложенных рассылок остановлен.")
             break

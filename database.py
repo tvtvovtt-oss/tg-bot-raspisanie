@@ -5,17 +5,29 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Set
 from config import DATABASE_PATH, ADMIN_IDS, STAT_ADMIN_IDS
+from timeutil import now_local
 
 logger = logging.getLogger(__name__)
 
 _MAINTENANCE_CACHE: Optional[bool] = None
 _ADMIN_IDS_CACHE: Optional[Set[int]] = None
 _STAT_ADMIN_IDS_CACHE: Optional[Set[int]] = None
+_RESTORE_IN_PROGRESS: bool = False
+
+
+def set_restore_in_progress(value: bool) -> None:
+    """Помечает, что идёт восстановление БД: бот не должен писать в неё в это время."""
+    global _RESTORE_IN_PROGRESS
+    _RESTORE_IN_PROGRESS = value
+
+
+def is_restore_in_progress() -> bool:
+    return _RESTORE_IN_PROGRESS
 
 
 def next_daily_run_str(repeat_time: Optional[str], now: Optional[datetime] = None) -> str:
     """Returns the next occurrence (tomorrow at HH:MM) of a daily broadcast."""
-    now = now or datetime.now()
+    now = now or now_local()
     try:
         rh, rm = map(int, (repeat_time or "07:00").split(":"))
     except ValueError:
@@ -69,7 +81,10 @@ async def init_db(recover_interrupted: bool = False):
             "teacher_name": "TEXT",
             "notifications": "INTEGER DEFAULT 1",
             "updated_at": "TIMESTAMP",
-            "blocked_bot": "INTEGER DEFAULT 0"
+            "blocked_bot": "INTEGER DEFAULT 0",
+            # 1 = у пользователя сменилась цель (группа/преподаватель) или включены уведомления:
+            # уже опубликованное расписание нужно отметить «как известное», а не рассылать пачкой.
+            "baseline_pending": "INTEGER DEFAULT 0"
         }
         for col_name, col_type in col_defs.items():
             if col_name not in existing_cols:
@@ -165,16 +180,27 @@ async def init_db(recover_interrupted: bool = False):
                 else:
                     await db.execute("""
                         UPDATE broadcasts
-                        SET status = 'failed', completed_at = COALESCE(completed_at, datetime('now', 'localtime'))
+                        SET status = 'failed', completed_at = COALESCE(completed_at, ?)
                         WHERE id = ?
-                    """, (bc_id,))
+                    """, (now_local().strftime("%Y-%m-%d %H:%M:%S"), bc_id))
 
-        # Clean up any mistakenly recorded future dates so users will receive the real notifications once published
+        today_dt = now_local()
+        # Журнал уведомлений не должен расти бесконечно: старые даты уже никому не нужны.
         try:
-            tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-            await db.execute("DELETE FROM notified_schedules WHERE schedule_date > ?", (tomorrow_str,))
-        except Exception:
-            pass
+            retention_str = (today_dt - timedelta(days=60)).strftime("%Y-%m-%d")
+            await db.execute("DELETE FROM notified_schedules WHERE schedule_date < ?", (retention_str,))
+        except Exception as e:
+            logger.debug(f"Очистка журнала уведомлений пропущена: {e}")
+
+        if recover_interrupted:
+            # Только при запуске: удаляем ошибочно записанные будущие даты, чтобы пользователи
+            # получили настоящие уведомления после публикации. Во время работы бота этого делать
+            # нельзя, иначе повторный init_db() вызовет повторную рассылку уведомлений.
+            try:
+                tomorrow_str = (today_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+                await db.execute("DELETE FROM notified_schedules WHERE schedule_date > ?", (tomorrow_str,))
+            except Exception as e:
+                logger.debug(f"Очистка будущих дат пропущена: {e}")
 
         # Seed bot_admins from config.ADMIN_IDS
         for a_id in ADMIN_IDS:
@@ -228,7 +254,7 @@ async def ensure_user(
 ):
     """Регистрирует пользователя при первом обращении, если его ещё нет в базе."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        now = datetime.now().isoformat()
+        now = now_local().isoformat()
         # Any update from the user means the bot is reachable again.
         await db.execute("""
             INSERT INTO users (user_id, username, first_name, updated_at, blocked_bot)
@@ -257,13 +283,19 @@ async def set_user_group(
     first_name: Optional[str] = None
 ):
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        now = datetime.now().isoformat()
+        now = now_local().isoformat()
         await db.execute("""
-            INSERT INTO users (user_id, username, first_name, group_id, group_name, notifications, updated_at)
-            VALUES (?, ?, ?, ?, ?, 1, ?)
+            INSERT INTO users (
+                user_id, username, first_name, group_id, group_name, notifications, updated_at, baseline_pending
+            )
+            VALUES (?, ?, ?, ?, ?, 1, ?, 1)
             ON CONFLICT(user_id) DO UPDATE SET
                 username = COALESCE(excluded.username, users.username),
                 first_name = COALESCE(excluded.first_name, users.first_name),
+                baseline_pending = CASE
+                    WHEN users.group_id IS excluded.group_id THEN COALESCE(users.baseline_pending, 0)
+                    ELSE 1
+                END,
                 group_id = excluded.group_id,
                 group_name = excluded.group_name,
                 updated_at = excluded.updated_at
@@ -277,11 +309,15 @@ async def set_user_teacher(
     teacher_name: str
 ):
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        now = datetime.now().isoformat()
+        now = now_local().isoformat()
         await db.execute("""
-            INSERT INTO users (user_id, teacher_id, teacher_name, notifications, updated_at)
-            VALUES (?, ?, ?, 1, ?)
+            INSERT INTO users (user_id, teacher_id, teacher_name, notifications, updated_at, baseline_pending)
+            VALUES (?, ?, ?, 1, ?, 1)
             ON CONFLICT(user_id) DO UPDATE SET
+                baseline_pending = CASE
+                    WHEN users.teacher_id IS excluded.teacher_id THEN COALESCE(users.baseline_pending, 0)
+                    ELSE 1
+                END,
                 teacher_id = excluded.teacher_id,
                 teacher_name = excluded.teacher_name,
                 updated_at = excluded.updated_at
@@ -299,8 +335,14 @@ async def toggle_user_notifications(user_id: int) -> bool:
             new_val = 0 if curr == 1 else 1
         
         await db.execute(
-            "UPDATE users SET notifications = ?, updated_at = ? WHERE user_id = ?",
-            (new_val, datetime.now().isoformat(), user_id)
+            """
+            UPDATE users
+            SET notifications = ?,
+                updated_at = ?,
+                baseline_pending = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(baseline_pending, 0) END
+            WHERE user_id = ?
+            """,
+            (new_val, now_local().isoformat(), new_val, user_id)
         )
         await db.commit()
         return (new_val == 1)
@@ -318,7 +360,8 @@ async def get_users_for_notifications() -> list:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         query = """
-            SELECT user_id, username, first_name, group_id, group_name, teacher_id, teacher_name
+            SELECT user_id, username, first_name, group_id, group_name, teacher_id, teacher_name,
+                   COALESCE(baseline_pending, 0) AS baseline_pending
             FROM users
             WHERE (notifications IS NULL OR notifications = 1)
               AND COALESCE(blocked_bot, 0) = 0
@@ -327,6 +370,36 @@ async def get_users_for_notifications() -> list:
         async with db.execute(query) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+
+async def clear_baseline_pending(user_ids: List[int]) -> None:
+    """Снимает пометку «нужна базовая отметка уведомлений» после её выполнения."""
+    if not user_ids:
+        return
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.executemany(
+            "UPDATE users SET baseline_pending = 0 WHERE user_id = ?",
+            [(uid,) for uid in user_ids]
+        )
+        await db.commit()
+
+
+async def get_notified_fingerprints(
+    target_type: str,
+    target_id: str,
+    schedule_date: str
+) -> Dict[int, Optional[str]]:
+    """Один запрос вместо проверки каждого пользователя: {user_id: fingerprint} уже получивших уведомление."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute(
+            """
+            SELECT user_id, schedule_fingerprint FROM notified_schedules
+            WHERE target_type = ? AND target_id = ? AND schedule_date = ?
+            """,
+            (target_type, str(target_id), schedule_date)
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return {row[0]: row[1] for row in rows}
 
 
 async def is_user_notified(
@@ -369,15 +442,18 @@ async def mark_user_notified(
         async with aiosqlite.connect(DATABASE_PATH) as db:
             query = """
                 INSERT INTO notified_schedules (
-                    user_id, target_type, target_id, schedule_date, schedule_fingerprint
-                ) VALUES (?, ?, ?, ?, ?)
+                    user_id, target_type, target_id, schedule_date, schedule_fingerprint, notified_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, target_type, target_id, schedule_date) DO UPDATE SET
                     schedule_fingerprint = excluded.schedule_fingerprint,
-                    notified_at = CURRENT_TIMESTAMP
+                    notified_at = excluded.notified_at
             """
             await db.execute(
                 query,
-                (user_id, target_type, str(target_id), schedule_date, schedule_fingerprint)
+                (
+                    user_id, target_type, str(target_id), schedule_date, schedule_fingerprint,
+                    now_local().strftime("%Y-%m-%d %H:%M:%S")
+                )
             )
             await db.commit()
     except Exception as e:
@@ -547,7 +623,7 @@ async def get_bot_stats() -> Dict[str, Any]:
             with_teacher = (await c.fetchone())[0]
 
         # Активность за последние 24 часа и 7 дней
-        now = datetime.now()
+        now = now_local()
         day_ago = (now - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
         week_ago = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -617,7 +693,7 @@ async def create_broadcast(
 ) -> int:
     """Создает запись о новой рассылке. Возвращает broadcast_id."""
     status = "scheduled" if scheduled_at else "pending"
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = now_local().strftime("%Y-%m-%d %H:%M:%S")
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute("""
             INSERT INTO broadcasts (
@@ -667,7 +743,7 @@ async def get_broadcasts_count() -> int:
 
 async def get_due_scheduled_broadcasts() -> List[Dict[str, Any]]:
     """Возвращает список запланированных рассылок, время выполнения которых уже наступило."""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = now_local().strftime("%Y-%m-%d %H:%M:%S")
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         query = """
@@ -723,9 +799,9 @@ async def fail_broadcast_if_in_progress(broadcast_id: int):
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("""
             UPDATE broadcasts
-            SET status = 'failed', completed_at = datetime('now', 'localtime')
+            SET status = 'failed', completed_at = ?
             WHERE id = ? AND status = 'in_progress'
-        """, (broadcast_id,))
+        """, (now_local().strftime("%Y-%m-%d %H:%M:%S"), broadcast_id))
         await db.commit()
 
 

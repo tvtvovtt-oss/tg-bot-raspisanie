@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime, timedelta
 import html
 import os
@@ -19,7 +18,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from config import DATABASE_PATH
+from config import DATABASE_PATH, BACKUP_CHANNEL_ID, MAX_LIST_BUTTONS, TIMEZONE
 from database import (
     init_db,
     get_user, ensure_user, set_user_group, set_user_teacher, toggle_user_notifications,
@@ -34,7 +33,9 @@ from backup_service import (
     send_backup_to_channel,
     restore_database_from_channel
 )
-from broadcast_service import execute_broadcast
+from broadcast_service import execute_broadcast, spawn_background
+from delivery import TELEGRAM_MAX_TEXT_LENGTH
+from timeutil import now_local, today_local_str
 from parser import (
     get_available_dates,
     get_groups,
@@ -155,6 +156,55 @@ async def safe_answer(message: Message, text: str, reply_markup=None, **kwargs) 
         except Exception as e2:
             logger.error(f"Failed safe_answer completely: {e2}")
             return None
+
+
+def shown_of(total: int) -> str:
+    """«12» или «показаны первые 90 из 140», если список не помещается в кнопки Telegram."""
+    if total > MAX_LIST_BUTTONS:
+        return f"показаны первые {MAX_LIST_BUTTONS} из {total}"
+    return str(total)
+
+
+async def create_and_deliver_backup(bot, chat_id: int, requested_by: str, footer: Optional[str] = None) -> Optional[str]:
+    """
+    Делает снимок БД, сохраняет его в хранилище бэкапов и присылает файл в чат.
+    Возвращает текст ошибки или None, если всё прошло успешно.
+    """
+    backup_file = await create_safe_sqlite_backup_async()
+    if not backup_file or not os.path.exists(backup_file):
+        return "Не удалось создать файл бэкапа."
+    try:
+        saved = await send_backup_to_channel(
+            bot,
+            caption_extra=requested_by,
+            backup_file_path=backup_file,
+            cleanup_local=False
+        )
+        stats = await get_bot_stats()
+        caption = (
+            f"{te(PE_FILE)} <b>Резервная копия базы данных</b>\n\n"
+            f"📅 Создан: <code>{now_local().strftime('%d.%m.%Y %H:%M:%S')}</code>\n"
+            f"👥 Всего пользователей: <b>{stats.get('total', 0)}</b>\n"
+            f"🔔 С уведомлениями: <b>{stats.get('with_notif', 0)}</b>\n"
+            f"📣 Рассылок: <b>{stats.get('total_broadcasts', 0)}</b>\n"
+        )
+        if saved is not None:
+            storage = "канале бэкапов" if BACKUP_CHANNEL_ID else "чате администратора"
+            caption += f"\n<i>Копия также сохранена и закреплена в {storage}.</i>"
+        if footer:
+            caption += f"\n<i>{footer}</i>"
+        await bot.send_document(
+            chat_id=chat_id,
+            document=FSInputFile(backup_file, filename="bot.db"),
+            caption=caption,
+            parse_mode="HTML"
+        )
+        return None
+    except Exception as e:
+        logger.error(f"Не удалось отправить бэкап: {e}")
+        return f"Ошибка отправки бэкапа: {e}"
+    finally:
+        remove_local_file(backup_file)
 
 
 def build_welcome_text(user, first_name: str) -> str:
@@ -279,7 +329,8 @@ async def handle_reply_stats_button(message: Message, state: FSMContext):
 
 @router.message(F.text.in_({"Звонки", "🔔 Звонки"}))
 @router.message(Command("calls"))
-async def cmd_calls(message: Message):
+async def cmd_calls(message: Message, state: FSMContext):
+    await state.clear()
     await safe_answer(message, get_calls_text(), reply_markup=get_calls_keyboard())
 
 
@@ -327,7 +378,8 @@ async def cmd_search_teacher(message: Message, state: FSMContext):
 
 @router.message(F.text.in_({"На сегодня", "📅 На сегодня", "Расписание на сегодня", "🗓 На сегодня", "📆 На сегодня", "Сегодня", "сегодня"}))
 @router.message(Command("today"))
-async def cmd_today(message: Message):
+async def cmd_today(message: Message, state: FSMContext):
+    await state.clear()
     user = await get_user(message.from_user.id)
     if not user or not user.get("group_id"):
         await safe_answer(
@@ -338,7 +390,7 @@ async def cmd_today(message: Message):
         return
 
     dates_info = await get_available_dates()
-    today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
+    today_str = dates_info.get("today") or today_local_str()
 
     wait_msg = await safe_answer(message, f"{te(PE_CALENDAR)} <i>Загружаю расписание с almetpt.ru...</i>")
     sched = await get_group_schedule(user["group_id"], today_str)
@@ -357,7 +409,8 @@ async def cmd_today(message: Message):
 
 @router.message(F.text.in_({"На завтра", "📆 На завтра", "Расписание на завтра", "📅 На завтра", "Завтра", "завтра"}))
 @router.message(Command("tomorrow"))
-async def cmd_tomorrow(message: Message):
+async def cmd_tomorrow(message: Message, state: FSMContext):
+    await state.clear()
     user = await get_user(message.from_user.id)
     if not user or not user.get("group_id"):
         await safe_answer(
@@ -387,7 +440,8 @@ async def cmd_tomorrow(message: Message):
 
 @router.message(F.text.in_({"Выбрать дату", "🗓 Выбрать дату", "📅 Выбрать дату", "Даты", "даты", "Выбор даты"}))
 @router.message(Command("dates"))
-async def cmd_choose_date(message: Message):
+async def cmd_choose_date(message: Message, state: FSMContext):
+    await state.clear()
     user = await get_user(message.from_user.id)
     group_id = user["group_id"] if user and user.get("group_id") else ""
     
@@ -437,7 +491,7 @@ async def cb_menu_handler(query: CallbackQuery, callback_data: MenuCallback):
             )
             return
         dates_info = await get_available_dates()
-        today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
+        today_str = dates_info.get("today") or today_local_str()
         sched = await get_group_schedule(user["group_id"], today_str)
         text = format_schedule_message(sched, user["group_name"], today_str, "Сегодня")
         kb = get_schedule_nav_inline_keyboard(user["group_id"], today_str, sched.get("url"))
@@ -529,7 +583,7 @@ async def cb_teacher_handler(query: CallbackQuery, callback_data: TeacherCallbac
         kb = get_teachers_search_inline_keyboard(teachers, with_back=True)
         await safe_edit_text(
             query.message,
-            f"{te(PE_PERSON_CHECK)} <b>Преподаватели на букву «{letter}» ({len(teachers)}):</b>\nВыбери из списка:",
+            f"{te(PE_PERSON_CHECK)} <b>Преподаватели на букву «{letter}» ({shown_of(len(teachers))}):</b>\nВыбери из списка:",
             reply_markup=kb
         )
 
@@ -542,7 +596,7 @@ async def cb_teacher_handler(query: CallbackQuery, callback_data: TeacherCallbac
         await set_user_teacher(query.from_user.id, t_id, t_name)
         
         dates_info = await get_available_dates()
-        today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
+        today_str = dates_info.get("today") or today_local_str()
 
         await safe_edit_text(
             query.message,
@@ -577,7 +631,7 @@ async def cb_group_handler(query: CallbackQuery, callback_data: GroupCallback):
         kb = get_groups_search_inline_keyboard(groups, with_back_course=True, back_action="zaochn_menu")
         await safe_edit_text(
             query.message,
-            f"{te(PE_INFO)} <b>Все группы заочного отделения ({len(groups)}):</b>\nВыбери свою группу кнопками:",
+            f"{te(PE_INFO)} <b>Все группы заочного отделения ({shown_of(len(groups))}):</b>\nВыбери свою группу кнопками:",
             reply_markup=kb
         )
         return
@@ -595,7 +649,7 @@ async def cb_group_handler(query: CallbackQuery, callback_data: GroupCallback):
         title_form = "очное отделение" if form == "fulltime" else "заочное отделение"
         await safe_edit_text(
             query.message,
-            f"{te(PE_INFO)} <b>Группы {course_num} курса ({title_form}, {len(groups)}):</b>\nВыбери свою группу кнопками:",
+            f"{te(PE_INFO)} <b>Группы {course_num} курса ({title_form}, {shown_of(len(groups))}):</b>\nВыбери свою группу кнопками:",
             reply_markup=kb
         )
         return
@@ -615,7 +669,7 @@ async def cb_group_handler(query: CallbackQuery, callback_data: GroupCallback):
         )
         
         dates_info = await get_available_dates()
-        today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
+        today_str = dates_info.get("today") or today_local_str()
         
         await safe_edit_text(
             query.message,
@@ -721,7 +775,7 @@ async def process_teacher_search_state(message: Message, state: FSMContext):
     kb = get_teachers_search_inline_keyboard(teachers, with_back=True)
     await safe_answer(
         message,
-        f"{te(PE_PERSON_CHECK)} <b>Найденные преподаватели ({len(teachers)}):</b>\nВыбери из списка:",
+        f"{te(PE_PERSON_CHECK)} <b>Найденные преподаватели ({shown_of(len(teachers))}):</b>\nВыбери из списка:",
         reply_markup=kb
     )
 
@@ -744,11 +798,11 @@ async def process_any_text(message: Message, state: FSMContext):
             return
 
         dates_info = await get_available_dates()
-        today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
+        today_str = dates_info.get("today") or today_local_str()
         try:
             today_dt = datetime.strptime(today_str, "%Y-%m-%d")
         except Exception:
-            today_dt = datetime.now()
+            today_dt = now_local()
 
         target_date_str, day_label = resolve_weekday_to_date(wd, today_dt)
         wait_msg = await safe_answer(
@@ -780,7 +834,7 @@ async def process_any_text(message: Message, state: FSMContext):
             kb = get_teachers_search_inline_keyboard(teachers, with_back=False)
             await safe_answer(
                 message,
-                f"{te(PE_PERSON_CHECK)} <b>Найденные преподаватели ({len(teachers)}):</b>\nВыбери из списка:",
+                f"{te(PE_PERSON_CHECK)} <b>Найденные преподаватели ({shown_of(len(teachers))}):</b>\nВыбери из списка:",
                 reply_markup=kb
             )
             return
@@ -816,7 +870,7 @@ async def handle_group_search_query(message: Message, query: str, preloaded_grou
             first_name=message.from_user.first_name
         )
         dates_info = await get_available_dates()
-        today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
+        today_str = dates_info.get("today") or today_local_str()
 
         wait_msg = await safe_answer(message, f"{te(PE_CHECK)} Выбрана группа <b>{html.escape(g['name'])}</b>!\nЗагружаю расписание...")
         sched = await get_group_schedule(str(g["id"]), today_str)
@@ -835,7 +889,7 @@ async def handle_group_search_query(message: Message, query: str, preloaded_grou
     kb = get_groups_search_inline_keyboard(groups)
     await safe_answer(
         message,
-        f"{te(PE_PEOPLE)} <b>Найденные группы ({len(groups)}):</b>\nВыбери свою группу кнопками:",
+        f"{te(PE_PEOPLE)} <b>Найденные группы ({shown_of(len(groups))}):</b>\nВыбери свою группу кнопками:",
         reply_markup=kb
     )
 
@@ -947,40 +1001,12 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
 
     elif action == "backup":
         await safe_query_answer(query, "Формирую бэкап базы данных...")
-        backup_file = await create_safe_sqlite_backup_async()
-        if backup_file and os.path.exists(backup_file):
-            try:
-                await send_backup_to_channel(
-                    query.bot,
-                    caption_extra=f"Запрос из админ-панели (ID {query.from_user.id})",
-                    backup_file_path=backup_file,
-                    cleanup_local=False
-                )
-                stats = await get_bot_stats()
-                doc = FSInputFile(backup_file, filename="bot.db")
-                caption = (
-                    f"{te(PE_FILE)} <b>Резервная копия базы данных</b>\n\n"
-                    f"📅 Создан: <code>{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</code>\n"
-                    f"👥 Всего пользователей: <b>{stats.get('total', 0)}</b>\n"
-                    f"🔔 С уведомлениями: <b>{stats.get('with_notif', 0)}</b>\n"
-                    f"📣 Рассылок: <b>{stats.get('total_broadcasts', 0)}</b>\n\n"
-                    f"<i>Файл также сохранен и закреплен в канале бэкапов.</i>"
-                )
-                await query.bot.send_document(
-                    chat_id=query.from_user.id,
-                    document=doc,
-                    caption=caption,
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                await safe_query_answer(query, f"Ошибка отправки бэкапа: {e}", show_alert=True)
-            finally:
-                try:
-                    remove_local_file(backup_file)
-                except Exception:
-                    pass
-        else:
-            await safe_query_answer(query, "Не удалось создать файл бэкапа.", show_alert=True)
+        error = await create_and_deliver_backup(
+            query.bot, query.from_user.id, f"Запрос из админ-панели (ID {query.from_user.id})"
+        )
+        if error:
+            # На callback уже отвечено выше, поэтому ошибку показываем сообщением.
+            await safe_answer(query.message, f"{te(PE_WARNING, '!')} {html.escape(error)}")
 
 
 # ---------- Логика создания и настройки рассылки ----------
@@ -988,16 +1014,16 @@ async def cb_admin_handler(query: CallbackQuery, callback_data: AdminCallback, s
 def parse_custom_scheduled_time(input_str: str) -> Tuple[Optional[datetime], Optional[str]]:
     """
     Разбирает пользовательскую строку даты/времени для запланированной рассылки.
-    Поддерживает:
-    - ЧЧ:ММ (напр. 18:30)
-    - ДД.ММ ЧЧ:ММ (напр. 12.09 10:00)
+    Время считается по часовому поясу техникума (TIMEZONE). Поддерживает:
+    - ЧЧ:ММ (напр. 18:30) — только с двоеточием, потому что запись «12.09» неоднозначна
+    - ДД.ММ ЧЧ:ММ (напр. 12.09 10:00) — только будущая дата текущего года
     - ДД.ММ.ГГГГ ЧЧ:ММ (напр. 12.09.2026 10:00)
     """
     raw = input_str.strip()
-    now = datetime.now()
+    now = now_local()
 
     # 1. Формат ЧЧ:ММ
-    time_match = re.match(r"^(\d{1,2})[:.-](\d{2})$", raw)
+    time_match = re.match(r"^(\d{1,2}):(\d{2})$", raw)
     if time_match:
         h, m = int(time_match.group(1)), int(time_match.group(2))
         if 0 <= h <= 23 and 0 <= m <= 59:
@@ -1008,17 +1034,24 @@ def parse_custom_scheduled_time(input_str: str) -> Tuple[Optional[datetime], Opt
             return target_dt, None
         return None, "Некорректное время. Часы: 0-23, минуты: 0-59."
 
+    # Дата без времени (например, 12.09) — не угадываем, а просим уточнить.
+    if re.match(r"^\d{1,2}[.-]\d{1,2}$", raw):
+        return None, "Укажите дату вместе со временем: <code>ДД.ММ ЧЧ:ММ</code> (напр. <code>12.09 10:00</code>)."
+
     # 2. Формат ДД.ММ ЧЧ:ММ
     dt_match1 = re.match(r"^(\d{1,2})[.-](\d{1,2})\s+(\d{1,2})[:.-](\d{2})$", raw)
     if dt_match1:
         d, mon, h, m = int(dt_match1.group(1)), int(dt_match1.group(2)), int(dt_match1.group(3)), int(dt_match1.group(4))
         try:
             target_dt = datetime(year=now.year, month=mon, day=d, hour=h, minute=m, second=0)
-            if target_dt <= now:
-                target_dt = datetime(year=now.year + 1, month=mon, day=d, hour=h, minute=m, second=0)
-            return target_dt, None
         except ValueError:
             return None, "Некорректная дата или время."
+        if target_dt <= now:
+            return None, (
+                "Эта дата в текущем году уже прошла. "
+                "Если нужен другой год, укажите его: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>."
+            )
+        return target_dt, None
 
     # 3. Формат ДД.ММ.ГГГГ ЧЧ:ММ
     dt_match2 = re.match(r"^(\d{1,2})[.-](\d{1,2})[.-](\d{4})\s+(\d{1,2})[:.-](\d{2})$", raw)
@@ -1107,6 +1140,27 @@ async def handle_broadcast_text_input(message: Message, state: FSMContext):
             await safe_answer(message, text_menu, reply_markup=get_stat_admin_menu_keyboard(is_full_admin=False))
         return
 
+    # Рассылка отправляется только текстом: фото, видео и стикеры не поддерживаются.
+    if not message.text or not message.text.strip():
+        await safe_answer(
+            message,
+            f"{te(PE_WARNING, '!')} Для рассылки нужно <b>текстовое</b> сообщение. "
+            "Фото, видео и файлы не рассылаются, отправьте текст или напишите <code>отмена</code>."
+        )
+        return
+
+    # Telegram отклоняет сообщения длиннее лимита; проверяем сразу, а не после подтверждения.
+    # Длина считается в UTF-16, как её считает Telegram (эмодзи вне BMP занимают 2 символа).
+    text_length = len(message.text.encode("utf-16-le")) // 2
+    if text_length > TELEGRAM_MAX_TEXT_LENGTH:
+        await safe_answer(
+            message,
+            f"{te(PE_WARNING, '!')} Текст слишком длинный: <b>{text_length}</b> символов, "
+            f"максимум <b>{TELEGRAM_MAX_TEXT_LENGTH}</b>. Сократите сообщение и отправьте снова "
+            "или напишите <code>отмена</code>."
+        )
+        return
+
     formatted_text = message.html_text if hasattr(message, "html_text") else html.escape(text)
     user_ids = await get_all_user_ids()
     total_users = len(user_ids)
@@ -1170,7 +1224,9 @@ async def cb_broadcast_handler(query: CallbackQuery, callback_data: BroadcastCal
     repeat_type = data.get("repeat_type", "once")
     repeat_time = data.get("repeat_time")
     is_daily = (repeat_type == "daily")
-    total_users = data.get("total_users") or len(await get_all_user_ids())
+    total_users = data.get("total_users")
+    if total_users is None:
+        total_users = len(await get_all_user_ids())
 
     if action == "toggle_pin":
         pin_message = not pin_message
@@ -1189,7 +1245,7 @@ async def cb_broadcast_handler(query: CallbackQuery, callback_data: BroadcastCal
             f"{te(PE_CLOCK)} <b>Выбор времени отправки рассылки</b>\n\n"
             "Выберите быстрый пресет, настройте <b>ежедневную рассылку</b> (например, каждое утро в 07:00) "
             "или введите дату и точное время вручную:\n\n"
-            f"Текущее время бота: <code>{datetime.now().strftime('%d.%m.%Y %H:%M')}</code>"
+            f"Текущее время бота ({TIMEZONE}): <code>{now_local().strftime('%d.%m.%Y %H:%M')}</code>"
         )
         await safe_edit_text(query.message, text, reply_markup=get_broadcast_time_selection_keyboard())
         await safe_query_answer(query)
@@ -1207,7 +1263,7 @@ async def cb_broadcast_handler(query: CallbackQuery, callback_data: BroadcastCal
 
     elif action == "set_time":
         val = callback_data.val
-        now = datetime.now()
+        now = now_local()
         new_scheduled_at = None
         new_repeat_type = "once"
         new_repeat_time = None
@@ -1279,6 +1335,9 @@ async def cb_broadcast_handler(query: CallbackQuery, callback_data: BroadcastCal
         await safe_query_answer(query, f"Время установлено: {sch_label}")
 
     elif action == "confirm_send":
+        # ВАЖНО: между чтением состояния выше и этой очисткой нет ни одного настоящего await,
+        # поэтому быстрое двойное нажатие «Отправить» не создаёт вторую рассылку (второй
+        # обработчик увидит уже пустое состояние). Не вставляйте сюда обращений к БД до state.clear().
         await state.clear()
         bc_id = await create_broadcast(
             created_by=query.from_user.id,
@@ -1302,7 +1361,7 @@ async def cb_broadcast_handler(query: CallbackQuery, callback_data: BroadcastCal
             )
         elif not scheduled_at:
             # Мгновенный запуск рассылки в фоне
-            asyncio.create_task(execute_broadcast(query.bot, bc_id))
+            spawn_background(execute_broadcast(query.bot, bc_id))
             pin_note_fast = "Сообщение будет закреплено в чатах пользователей." if pin_message else "Без закрепления."
             success_msg = (
                 f"{te(PE_SEND_UP)} <b>Рассылка #{bc_id} запущена!</b>\n\n"
@@ -1343,7 +1402,10 @@ async def handle_broadcast_daily_time_input(message: Message, state: FSMContext)
         repeat_type = data.get("repeat_type", "once")
         repeat_time = data.get("repeat_time")
         total_users = data.get("total_users") or len(await get_all_user_ids())
-        sch_label = scheduled_at if scheduled_at else "Сразу"
+        sch_label = (
+            f"Ежедневно в {repeat_time or '07:00'}" if repeat_type == "daily"
+            else (scheduled_at if scheduled_at else "Сразу")
+        )
         setup_text = render_broadcast_setup_text(bc_text, pin_message, scheduled_at, total_users, repeat_type, repeat_time)
         kb = get_broadcast_setup_keyboard(pin_message, bool(scheduled_at), sch_label, is_daily=(repeat_type == "daily"))
         await safe_answer(message, setup_text, reply_markup=kb)
@@ -1365,7 +1427,7 @@ async def handle_broadcast_daily_time_input(message: Message, state: FSMContext)
         return
 
     rep_time_str = f"{h:02d}:{m:02d}"
-    now = datetime.now()
+    now = now_local()
     target_today = now.replace(hour=h, minute=m, second=0, microsecond=0)
     first_dt = target_today if now < target_today else (target_today + timedelta(days=1))
     scheduled_at_str = first_dt.strftime("%Y-%m-%d %H:%M:00")
@@ -1403,9 +1465,15 @@ async def handle_broadcast_custom_time_input(message: Message, state: FSMContext
         pin_message = data.get("pin_message", False)
         scheduled_at = data.get("scheduled_at")
         total_users = data.get("total_users") or len(await get_all_user_ids())
-        sch_label = scheduled_at if scheduled_at else "Сразу"
-        setup_text = render_broadcast_setup_text(bc_text, pin_message, scheduled_at, total_users)
-        kb = get_broadcast_setup_keyboard(pin_message, bool(scheduled_at), sch_label)
+        repeat_type = data.get("repeat_type", "once")
+        repeat_time = data.get("repeat_time")
+        is_daily = (repeat_type == "daily")
+        sch_label = (
+            f"Ежедневно в {repeat_time or '07:00'}" if is_daily
+            else (scheduled_at if scheduled_at else "Сразу")
+        )
+        setup_text = render_broadcast_setup_text(bc_text, pin_message, scheduled_at, total_users, repeat_type, repeat_time)
+        kb = get_broadcast_setup_keyboard(pin_message, bool(scheduled_at), sch_label, is_daily=is_daily)
         await safe_answer(message, setup_text, reply_markup=kb)
         return
 
@@ -1569,7 +1637,6 @@ def render_broadcast_detail_text(bc: Dict[str, Any]) -> str:
     )
 
 
-@router.message(Command("statadmin"))
 @router.message(Command("statadmin", "stats", "stat", "statistics"), StateFilter("*"))
 async def cmd_statadmin(message: Message, state: FSMContext):
     """Открытие отдельной панели статистики бота и рассылок."""
@@ -1672,40 +1739,11 @@ async def cb_stat_admin_handler(query: CallbackQuery, callback_data: StatAdminCa
             await safe_query_answer(query, "Доступ запрещен.", show_alert=True)
             return
         await safe_query_answer(query, "Формирую бэкап базы данных...")
-        backup_file = await create_safe_sqlite_backup_async()
-        if backup_file and os.path.exists(backup_file):
-            try:
-                await send_backup_to_channel(
-                    query.bot,
-                    caption_extra=f"Запрос администратора (ID {query.from_user.id})",
-                    backup_file_path=backup_file,
-                    cleanup_local=False
-                )
-                stats = await get_bot_stats()
-                doc = FSInputFile(backup_file, filename="bot.db")
-                caption = (
-                    f"{te(PE_FILE)} <b>Резервная копия базы данных</b>\n\n"
-                    f"📅 Создан: <code>{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</code>\n"
-                    f"👥 Всего пользователей: <b>{stats.get('total', 0)}</b>\n"
-                    f"🔔 С уведомлениями: <b>{stats.get('with_notif', 0)}</b>\n"
-                    f"📣 Рассылок: <b>{stats.get('total_broadcasts', 0)}</b>\n\n"
-                    f"<i>Файл также сохранен и закреплен в канале бэкапов.</i>"
-                )
-                await query.bot.send_document(
-                    chat_id=query.from_user.id,
-                    document=doc,
-                    caption=caption,
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                await safe_query_answer(query, f"Ошибка отправки бэкапа: {e}", show_alert=True)
-            finally:
-                try:
-                    remove_local_file(backup_file)
-                except Exception:
-                    pass
-        else:
-            await safe_query_answer(query, "Не удалось создать файл бэкапа.", show_alert=True)
+        error = await create_and_deliver_backup(
+            query.bot, query.from_user.id, f"Запрос администратора (ID {query.from_user.id})"
+        )
+        if error:
+            await safe_answer(query.message, f"{te(PE_WARNING, '!')} {html.escape(error)}")
 
     elif action == "close":
         try:
@@ -1810,45 +1848,22 @@ async def cmd_backup(message: Message):
         return
 
     status_msg = await safe_answer(message, f"{te(PE_CLOCK)} Формирую резервную копию базы данных...")
-
-    backup_file = await create_safe_sqlite_backup_async()
-    if backup_file and os.path.exists(backup_file):
+    error = await create_and_deliver_backup(
+        message.bot,
+        message.chat.id,
+        f"Ручной бэкап администратора {message.from_user.id}",
+        footer=(
+            "Чтобы восстановить базу из этого файла, отправьте его в этот чат. "
+            "Команда /restore берёт копию, закреплённую в канале бэкапов."
+        )
+    )
+    if status_msg:
         try:
-            await send_backup_to_channel(
-                message.bot,
-                caption_extra=f"Ручной бэкап администратора {message.from_user.id}",
-                backup_file_path=backup_file,
-                cleanup_local=False
-            )
-            stats = await get_bot_stats()
-            doc = FSInputFile(backup_file, filename="bot.db")
-            caption = (
-                f"{te(PE_FILE)} <b>Резервная копия базы данных</b>\n\n"
-                f"📅 Время: <code>{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</code>\n"
-                f"👥 Всего пользователей: <b>{stats.get('total', 0)}</b>\n"
-                f"🔔 С уведомлениями: <b>{stats.get('with_notif', 0)}</b>\n"
-                f"📣 Рассылок: <b>{stats.get('total_broadcasts', 0)}</b>\n\n"
-                f"<i>Этот файл содержит полную структуру и данные. Вы можете восстановить его командой /restore "
-                f"или просто отправив файл bot.db в этот чат.</i>"
-            )
-            await message.bot.send_document(
-                chat_id=message.chat.id,
-                document=doc,
-                caption=caption,
-                parse_mode="HTML"
-            )
-            if status_msg:
-                try:
-                    await status_msg.delete()
-                except Exception:
-                    pass
-        finally:
-            try:
-                remove_local_file(backup_file)
-            except Exception:
-                pass
-    else:
-        await safe_answer(message, f"{te(PE_WARNING, '!')} Не удалось создать снимок базы данных.")
+            await status_msg.delete()
+        except Exception:
+            pass
+    if error:
+        await safe_answer(message, f"{te(PE_WARNING, '!')} {html.escape(error)}")
 
 
 @router.message(Command("restore"), StateFilter("*"))

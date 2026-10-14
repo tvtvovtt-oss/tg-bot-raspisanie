@@ -2,7 +2,6 @@ import os
 import sqlite3
 import logging
 import asyncio
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
@@ -11,11 +10,14 @@ from aiogram import Bot
 from aiogram.types import FSInputFile, Message
 
 from config import DATABASE_PATH, BACKUP_CHANNEL_ID, ADMIN_IDS
-from database import get_bot_stats, init_db
+from database import get_bot_stats, init_db, set_restore_in_progress, is_restore_in_progress
 from premium_emoji import te, PE_FILE
+from timeutil import now_local
 
 logger = logging.getLogger(__name__)
 _RESTORE_LOCK = asyncio.Lock()
+# Пауза перед записью в базу: даём закончить уже начатым запросам пользователей.
+RESTORE_GRACE_SECONDS = 0.5
 
 
 REQUIRED_TABLE_COLUMNS = {
@@ -82,13 +84,22 @@ def restore_sqlite_backup(source_path: str, destination_path: str) -> int:
 
 
 async def restore_sqlite_backup_async(source_path: str, destination_path: str) -> int:
-    """Serializes restores and keeps blocking SQLite work off the event loop."""
+    """Serializes restores and keeps blocking SQLite work off the event loop.
+
+    Пока идёт восстановление, бот не пишет в базу (middleware, рассылки и уведомления
+    проверяют is_restore_in_progress), иначе записи могли бы потеряться или упереться в блокировку.
+    """
     async with _RESTORE_LOCK:
-        return await asyncio.to_thread(
-            restore_sqlite_backup,
-            source_path,
-            destination_path
-        )
+        set_restore_in_progress(True)
+        try:
+            await asyncio.sleep(RESTORE_GRACE_SECONDS)
+            return await asyncio.to_thread(
+                restore_sqlite_backup,
+                source_path,
+                destination_path
+            )
+        finally:
+            set_restore_in_progress(False)
 
 
 def create_safe_sqlite_backup() -> Optional[str]:
@@ -102,7 +113,7 @@ def create_safe_sqlite_backup() -> Optional[str]:
 
     backup_dir = src_path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = now_local().strftime("%Y%m%d_%H%M%S_%f")
     dst_path = backup_dir / f"backup_{timestamp}_{uuid4().hex[:8]}.db"
 
     try:
@@ -150,8 +161,20 @@ async def send_backup_to_channel(
         return None
 
     try:
+        # Закреплённый в канале снимок — единственная точка восстановления, поэтому пустую или
+        # повреждённую базу поверх хорошей копии не загружаем.
+        try:
+            snapshot_users = await asyncio.to_thread(validate_sqlite_backup, backup_file_path)
+        except Exception as e:
+            logger.error(f"[BACKUP] Снимок базы не прошёл проверку и не будет загружен: {e}")
+            return None
+        if snapshot_users == 0:
+            logger.warning("[BACKUP] В снимке нет ни одного пользователя — загрузка в канал пропущена, "
+                           "чтобы не затереть последнюю хорошую копию.")
+            return None
+
         stats = await get_bot_stats()
-        now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        now_str = now_local().strftime("%d.%m.%Y %H:%M:%S")
         caption = (
             f"{te(PE_FILE)} #backup <b>Автоматическая резервная копия базы данных</b>\n\n"
             f"📅 Время создания: <code>{now_str}</code>\n"
@@ -180,7 +203,7 @@ async def send_backup_to_channel(
             )
             logger.info(f"[BACKUP] Резервная копия #{sent_msg.message_id} успешно сохранена и закреплена в {target_chat}!")
         except Exception as e:
-            logger.debug(f"[BACKUP] Не удалось закрепить сообщение бэкапа: {e}")
+            logger.warning(f"[BACKUP] Не удалось закрепить сообщение бэкапа (проверьте право «Закреплять сообщения» у бота): {e}")
 
         return sent_msg
 
@@ -273,7 +296,7 @@ async def backup_scheduler_worker(bot: Bot):
     await asyncio.sleep(60)
     while True:
         try:
-            if BACKUP_CHANNEL_ID:
+            if BACKUP_CHANNEL_ID and not is_restore_in_progress():
                 await send_backup_to_channel(bot, caption_extra="Периодический авто-бэкап (раз в 30 минут)")
         except Exception as e:
             logger.error(f"[BACKUP_WORKER] Ошибка в цикле авто-бэкапа: {e}")

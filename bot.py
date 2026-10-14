@@ -7,11 +7,13 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
-from config import BOT_TOKEN, ENABLE_NOTIFICATIONS, BACKUP_CHANNEL_ID
+from config import (
+    BOT_TOKEN, ENABLE_NOTIFICATIONS, BACKUP_CHANNEL_ID, DROP_PENDING_UPDATES, TIMEZONE, validate_config
+)
 from handlers import router
 from parser import get_groups, get_available_dates
 from notifier import schedule_notification_worker
-from broadcast_service import broadcast_scheduler_worker
+from broadcast_service import broadcast_scheduler_worker, cancel_background_tasks
 from backup_service import auto_restore_if_needed, backup_scheduler_worker, send_backup_to_channel
 from middlewares import MaintenanceMiddleware, UserActivityMiddleware
 
@@ -39,6 +41,14 @@ async def set_bot_commands(bot: Bot):
 
 
 async def main():
+    validate_config()
+    logger.info(f"Часовой пояс бота: {TIMEZONE}")
+    if not BACKUP_CHANNEL_ID:
+        logger.warning(
+            "BACKUP_CHANNEL_ID не задан: автоматических бэкапов в Telegram не будет. "
+            "Если база лежит не на постоянном диске, данные пропадут при пересоздании контейнера."
+        )
+
     logger.info("Создание экземпляра Telegram-бота...")
     bot = Bot(
         token=BOT_TOKEN,
@@ -66,8 +76,9 @@ async def main():
     # Set commands menu in Telegram UI
     await set_bot_commands(bot)
 
-    # Delete webhook to prevent conflicts and drop pending updates
-    await bot.delete_webhook(drop_pending_updates=True)
+    # Delete webhook to prevent conflicts. Накопленные за время простоя сообщения по умолчанию
+    # обрабатываются; сбросить их можно переменной DROP_PENDING_UPDATES=true.
+    await bot.delete_webhook(drop_pending_updates=DROP_PENDING_UPDATES)
 
     # Start background notifier worker (if enabled in config)
     notifier_task = None
@@ -81,9 +92,11 @@ async def main():
     broadcast_task = asyncio.create_task(broadcast_scheduler_worker(bot))
     logger.info("Фоновый планировщик отложенных рассылок запущен.")
 
-    # Start background backup scheduler worker (every 30 minutes)
-    backup_task = asyncio.create_task(backup_scheduler_worker(bot))
-    logger.info("Фоновый сервис автоматического резервного копирования запущен (раз в 30 мин).")
+    # Start background backup scheduler worker (every 30 minutes) — только если есть куда сохранять
+    backup_task = None
+    if BACKUP_CHANNEL_ID:
+        backup_task = asyncio.create_task(backup_scheduler_worker(bot))
+        logger.info("Фоновый сервис автоматического резервного копирования запущен (раз в 30 мин).")
 
     logger.info("Бот успешно запущен и готов к работе!")
     try:
@@ -95,17 +108,25 @@ async def main():
             task.cancel()
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
+        # Выполняющиеся рассылки отменяем до финального бэкапа, чтобы их статус успел записаться в базу.
+        await cancel_background_tasks()
         try:
             if BACKUP_CHANNEL_ID:
                 logger.info("Сохранение финального бэкапа перед завершением работы...")
                 await send_backup_to_channel(bot, caption_extra="Финальный авто-бэкап перед перезапуском контейнера")
         except Exception as e:
-            logger.debug(f"Не удалось отправить финальный бэкап: {e}")
+            logger.warning(f"Не удалось отправить финальный бэкап: {e}")
         await bot.session.close()
         logger.info("Бот остановлен.")
 
 
 if __name__ == "__main__":
+    try:
+        validate_config()
+    except ValueError as config_error:
+        logger.error(str(config_error))
+        sys.exit(1)
+
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):

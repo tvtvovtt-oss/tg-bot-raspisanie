@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   bot:
     build: .
@@ -11,6 +9,7 @@ services:
       - bot_data:/app/data
     environment:
       - DATABASE_PATH=/app/data/bot.db
+      - TZ=${TIMEZONE:-Europe/Moscow}
 
 volumes:
   bot_data:

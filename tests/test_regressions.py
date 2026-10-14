@@ -158,6 +158,8 @@ class BackupRegressionTests(unittest.IsolatedAsyncioTestCase):
             async def send_document(self, **kwargs):
                 raise RuntimeError("network unavailable")
 
+        # Пустые снимки в канал не отправляются, поэтому нужен хотя бы один пользователь.
+        await database.ensure_user(1, "user", "User")
         backup_path = await backup_service.create_safe_sqlite_backup_async()
         with patch.object(backup_service, "BACKUP_CHANNEL_ID", -100123):
             result = await backup_service.send_backup_to_channel(
@@ -188,7 +190,7 @@ class NotificationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(notifier, "is_maintenance_mode", AsyncMock(return_value=False)),
                 patch.object(notifier, "get_available_dates", AsyncMock(return_value=dates)),
                 patch.object(notifier, "get_users_for_notifications", AsyncMock(return_value=[user])),
-                patch.object(notifier, "is_user_notified", AsyncMock(return_value=False)),
+                patch.object(notifier, "get_notified_fingerprints", AsyncMock(return_value={})),
                 patch.object(notifier, "get_group_schedule", AsyncMock(return_value={"lessons": [{}]})),
                 patch.object(notifier, "is_schedule_published", return_value=True),
                 patch.object(notifier, "format_schedule_message", return_value="schedule"),

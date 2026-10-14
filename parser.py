@@ -1,12 +1,14 @@
 import time
 import re
 import html
+import logging
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 import httpx
 from bs4 import BeautifulSoup
 
 from config import ALMETPT_BASE_URL
+from timeutil import now_local, today_local_str
 from premium_emoji import (
     te, PE_CALENDAR, PE_CLOCK, PE_BELL, PE_PEOPLE,
     PE_PERSON_CHECK, PE_INFO, PE_PARTY, PE_WARNING,
@@ -21,9 +23,22 @@ _STAFFS_CACHE_TIME: float = 0
 _DATES_CACHE: Dict[str, Any] = {}
 _DATES_CACHE_TIME: float = 0
 
+_SCHEDULE_CACHE: Dict[Tuple[str, str, str], Tuple[float, Dict[str, Any]]] = {}
+
+logger = logging.getLogger(__name__)
+
 CACHE_TTL_GROUPS = 1800   # 30 minutes
 CACHE_TTL_STAFFS = 1800   # 30 minutes
 CACHE_TTL_DATES = 300     # 5 minutes
+CACHE_TTL_SCHEDULE = 45   # расписание группы/преподавателя: защита сайта от повторных кликов
+SCHEDULE_CACHE_MAX_ENTRIES = 500
+
+# После сбоя сайта не ждём таймаут на каждый запрос пользователя, а отвечаем сразу.
+FAILURE_BACKOFF_SECONDS = 30
+SCHEDULE_FAILURE_BACKOFF_SECONDS = 15
+_FAILED_AT: Dict[str, float] = {}
+
+HTTP_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -60,7 +75,7 @@ def infer_course_from_group_name(name: str, reference_date: Optional[datetime] =
     match = re.search(r"[-](\d{2})(?:\D|$)", name)
     if not match:
         return None
-    reference_date = reference_date or datetime.now()
+    reference_date = reference_date or now_local()
     academic_start_year = reference_date.year if reference_date.month >= 8 else reference_date.year - 1
     admission_year = 2000 + int(match.group(1))
     course = academic_start_year - admission_year + 1
@@ -89,99 +104,25 @@ def decode_response_json(resp: httpx.Response) -> Any:
     return json.loads(text)
 
 
-async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
-    """Fetches available schedule dates from /2020/schedule/dates"""
-    global _DATES_CACHE, _DATES_CACHE_TIME
-    now_ts = time.time()
-    if not force_refresh and _DATES_CACHE and (now_ts - _DATES_CACHE_TIME < CACHE_TTL_DATES):
-        return _DATES_CACHE
+def _in_backoff(key: str, seconds: float = FAILURE_BACKOFF_SECONDS) -> bool:
+    """True, если недавно (в пределах seconds) запрос по ключу завершился сбоем."""
+    failed_at = _FAILED_AT.get(key)
+    return failed_at is not None and (time.time() - failed_at) < seconds
 
-    url = f"{ALMETPT_BASE_URL}/2020/schedule/dates"
-    try:
-        async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=12.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                data = decode_response_json(resp)
-                today = data.get("now", "")
-                selected = data.get("selected_date", today)
-                raw_dates = data.get("dates", [])
-                
-                today_dt = datetime.strptime(today, "%Y-%m-%d") if today else datetime.now()
-                dates_dict = {}
 
-                # 1. Добавляем сегодняшние и будущие учебные дни (сегодня + до следующей недели, пропуская воскресенья)
-                for i in range(0, 7):
-                    fut = today_dt + timedelta(days=i)
-                    if fut.weekday() == 6:  # Воскресенье пропускаем
-                        continue
-                    fut_str = fut.strftime("%Y-%m-%d")
-                    dates_dict[fut_str] = {
-                        "date": fut_str,
-                        "day_name": "",
-                        "label": fut_str,
-                        "is_today": (i == 0),
-                        "is_future": (i > 0),
-                        "is_past": False,
-                        "on_site": False
-                    }
-
-                # 2. Добавляем опубликованные даты с сайта (включая архив текущей недели)
-                for d in raw_dates:
-                    dt = d.get("Date", "")
-                    if not dt:
-                        continue
-                    day_name = d.get("name", "") or d.get("Value", "")
-                    day_label = d.get("day", dt)
-                    try:
-                        d_obj = datetime.strptime(dt, "%Y-%m-%d")
-                        diff = (d_obj.date() - today_dt.date()).days
-                    except Exception:
-                        diff = 0
-
-                    if dt in dates_dict:
-                        dates_dict[dt]["day_name"] = day_name
-                        dates_dict[dt]["label"] = day_label
-                        dates_dict[dt]["on_site"] = True
-                    else:
-                        dates_dict[dt] = {
-                            "date": dt,
-                            "day_name": day_name,
-                            "label": day_label,
-                            "is_today": (diff == 0),
-                            "is_future": (diff > 0),
-                            "is_past": (diff < 0),
-                            "on_site": True
-                        }
-
-                # Сортировка: сегодня и будущие по возрастанию, затем архивные дни по убыванию
-                upcoming = sorted([d for d in dates_dict.values() if not d.get("is_past")], key=lambda x: x["date"])
-                past = sorted([d for d in dates_dict.values() if d.get("is_past")], key=lambda x: x["date"], reverse=True)
-                formatted_dates = upcoming + past
-
-                result = {
-                    "today": today,
-                    "selected": selected,
-                    "dates": formatted_dates
-                }
-                _DATES_CACHE = result
-                _DATES_CACHE_TIME = now_ts
-                return result
-    except Exception as e:
-        print(f"Error fetching dates: {e}")
-
-    # Fallback if request fails
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    today_dt = datetime.now()
+def _build_fallback_dates() -> Dict[str, Any]:
+    """Список дат без данных сайта: ближайшая неделя без воскресений и три предыдущих учебных дня."""
+    today_dt = now_local()
+    today_str = today_dt.strftime("%Y-%m-%d")
     fallback_dates = []
     for i in range(0, 7):
         d = today_dt + timedelta(days=i)
         if d.weekday() == 6:
             continue
-        d_val = d.strftime("%Y-%m-%d")
         fallback_dates.append({
-            "date": d_val,
+            "date": d.strftime("%Y-%m-%d"),
             "day_name": "",
-            "label": d_val,
+            "label": d.strftime("%Y-%m-%d"),
             "is_today": (i == 0),
             "is_future": (i > 0),
             "is_past": False,
@@ -191,11 +132,10 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
         d = today_dt - timedelta(days=i)
         if d.weekday() == 6:
             continue
-        d_val = d.strftime("%Y-%m-%d")
         fallback_dates.append({
-            "date": d_val,
+            "date": d.strftime("%Y-%m-%d"),
             "day_name": "",
-            "label": d_val,
+            "label": d.strftime("%Y-%m-%d"),
             "is_today": False,
             "is_future": False,
             "is_past": True,
@@ -206,6 +146,105 @@ async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
         "selected": today_str,
         "dates": fallback_dates
     }
+
+
+async def _fetch_dates() -> Optional[Dict[str, Any]]:
+    """Один запрос списка дат. None — сайт ответил не так, как ожидалось."""
+    url = f"{ALMETPT_BASE_URL}/2020/schedule/dates"
+    async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
+        resp = await client.get(url)
+    if resp.status_code != 200:
+        logger.warning("Список дат: сайт вернул код %s", resp.status_code)
+        return None
+
+    data = decode_response_json(resp)
+    today = data.get("now", "")
+    selected = data.get("selected_date", today)
+    raw_dates = data.get("dates", [])
+
+    today_dt = datetime.strptime(today, "%Y-%m-%d") if today else now_local()
+    dates_dict = {}
+
+    # 1. Добавляем сегодняшние и будущие учебные дни (сегодня + до следующей недели, пропуская воскресенья)
+    for i in range(0, 7):
+        fut = today_dt + timedelta(days=i)
+        if fut.weekday() == 6:  # Воскресенье пропускаем
+            continue
+        fut_str = fut.strftime("%Y-%m-%d")
+        dates_dict[fut_str] = {
+            "date": fut_str,
+            "day_name": "",
+            "label": fut_str,
+            "is_today": (i == 0),
+            "is_future": (i > 0),
+            "is_past": False,
+            "on_site": False
+        }
+
+    # 2. Добавляем опубликованные даты с сайта (включая архив текущей недели)
+    for d in raw_dates:
+        dt = d.get("Date", "")
+        if not dt:
+            continue
+        day_name = d.get("name", "") or d.get("Value", "")
+        day_label = d.get("day", dt)
+        try:
+            d_obj = datetime.strptime(dt, "%Y-%m-%d")
+            diff = (d_obj.date() - today_dt.date()).days
+        except Exception:
+            diff = 0
+
+        if dt in dates_dict:
+            dates_dict[dt]["day_name"] = day_name
+            dates_dict[dt]["label"] = day_label
+            dates_dict[dt]["on_site"] = True
+        else:
+            dates_dict[dt] = {
+                "date": dt,
+                "day_name": day_name,
+                "label": day_label,
+                "is_today": (diff == 0),
+                "is_future": (diff > 0),
+                "is_past": (diff < 0),
+                "on_site": True
+            }
+
+    # Сортировка: сегодня и будущие по возрастанию, затем архивные дни по убыванию
+    upcoming = sorted([d for d in dates_dict.values() if not d.get("is_past")], key=lambda x: x["date"])
+    past = sorted([d for d in dates_dict.values() if d.get("is_past")], key=lambda x: x["date"], reverse=True)
+
+    return {
+        "today": today,
+        "selected": selected,
+        "dates": upcoming + past
+    }
+
+
+async def get_available_dates(force_refresh: bool = False) -> Dict[str, Any]:
+    """Fetches available schedule dates from /2020/schedule/dates"""
+    global _DATES_CACHE, _DATES_CACHE_TIME
+    now_ts = time.time()
+    if not force_refresh and _DATES_CACHE and (now_ts - _DATES_CACHE_TIME < CACHE_TTL_DATES):
+        return _DATES_CACHE
+
+    if force_refresh or not _in_backoff("dates"):
+        try:
+            result = await _fetch_dates()
+        except Exception as e:
+            logger.warning("Error fetching dates: %s", e)
+            result = None
+        if result is not None:
+            _DATES_CACHE = result
+            _DATES_CACHE_TIME = now_ts
+            _FAILED_AT.pop("dates", None)
+            return result
+        _FAILED_AT["dates"] = time.time()
+
+    # Сайт недоступен: лучше отдать последние известные даты (если они ещё про сегодняшний день),
+    # чем урезанный список без архива.
+    if _DATES_CACHE and _DATES_CACHE.get("today") == today_local_str():
+        return _DATES_CACHE
+    return _build_fallback_dates()
 
 
 WEEKDAYS_RU_NAMES = [
@@ -222,7 +261,7 @@ def resolve_weekday_to_date(target_weekday: int, ref_date: Optional[datetime] = 
     Возвращает (date_str 'YYYY-MM-DD', human_label).
     """
     if ref_date is None:
-        ref_date = datetime.now()
+        ref_date = now_local()
 
     curr_weekday = ref_date.weekday()
     if target_weekday == curr_weekday:
@@ -274,7 +313,7 @@ def get_tomorrow_date(dates_info: Dict[str, Any]) -> str:
     Filters dates > today (sorted ascending, e.g. tomorrow).
     If not yet published, computes the next study day (skipping Sunday).
     """
-    today_str = dates_info.get("today") or datetime.now().strftime("%Y-%m-%d")
+    today_str = dates_info.get("today") or today_local_str()
     dates_list = dates_info.get("dates", [])
     future_dates = sorted([d["date"] for d in dates_list if d.get("date", "") > today_str])
     if future_dates:
@@ -286,7 +325,7 @@ def get_tomorrow_date(dates_info: Dict[str, Any]) -> str:
             next_day += timedelta(days=1)
         return next_day.strftime("%Y-%m-%d")
     except Exception:
-        return (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        return (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
@@ -296,9 +335,12 @@ async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
     if not force_refresh and _GROUPS_CACHE and (now_ts - _GROUPS_CACHE_TIME < CACHE_TTL_GROUPS):
         return _GROUPS_CACHE
 
+    if not force_refresh and _in_backoff("groups"):
+        return _GROUPS_CACHE
+
     url = f"{ALMETPT_BASE_URL}/2020/json/groups"
     try:
-        async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=15.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
                 data = decode_response_json(resp)
@@ -364,14 +406,18 @@ async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
                 if groups_dict:
                     _GROUPS_CACHE = groups_dict
                     _GROUPS_CACHE_TIME = now_ts
+                    _FAILED_AT.pop("groups", None)
                     return groups_dict
+            else:
+                logger.warning("Список групп: сайт вернул код %s", resp.status_code)
     except Exception as e:
-        print(f"Error fetching groups: {e}")
+        logger.warning("Error fetching groups: %s", e)
 
+    _FAILED_AT["groups"] = time.time()
     return _GROUPS_CACHE
 
 
-async def search_groups(query: str, limit: int = 24) -> List[Dict[str, Any]]:
+async def search_groups(query: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     Searches groups by first letters, numbers, or partial name.
     Supports English layout typos (e.g. 'bc' -> 'ис') and Latin lookalikes.
@@ -442,7 +488,7 @@ async def search_groups(query: str, limit: int = 24) -> List[Dict[str, Any]]:
         if g["id"] not in seen:
             seen.add(g["id"])
             unique_results.append(g)
-            if len(unique_results) >= limit:
+            if limit is not None and len(unique_results) >= limit:
                 break
 
     return unique_results
@@ -474,9 +520,12 @@ async def get_staffs(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
     if not force_refresh and _STAFFS_CACHE and (now_ts - _STAFFS_CACHE_TIME < CACHE_TTL_STAFFS):
         return _STAFFS_CACHE
 
+    if not force_refresh and _in_backoff("staffs"):
+        return _STAFFS_CACHE
+
     url = f"{ALMETPT_BASE_URL}/2020/json/staffs"
     try:
-        async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=15.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
                 data = decode_response_json(resp)
@@ -502,22 +551,29 @@ async def get_staffs(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
                 if staffs_dict:
                     _STAFFS_CACHE = staffs_dict
                     _STAFFS_CACHE_TIME = now_ts
+                    _FAILED_AT.pop("staffs", None)
                     return staffs_dict
+            else:
+                logger.warning("Список сотрудников: сайт вернул код %s", resp.status_code)
     except Exception as e:
-        print(f"Error fetching staffs: {e}")
+        logger.warning("Error fetching staffs: %s", e)
 
+    _FAILED_AT["staffs"] = time.time()
     return _STAFFS_CACHE
 
 
-async def search_teachers(query: str, limit: int = 15) -> List[Dict[str, Any]]:
+async def search_teachers(query: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     """Searches teachers by surname or full name."""
     all_staff = await get_staffs()
     if not all_staff:
         return []
 
     clean_q = normalize_string(query)
+    if not clean_q:
+        # «-», «...», «()» после нормализации пусты, а пустая строка входит в любую фамилию.
+        return []
     results = []
-    
+
     for s in all_staff.values():
         if not s.get("is_teacher", 1):
             continue
@@ -542,7 +598,7 @@ async def get_teacher_letters() -> List[str]:
     return sorted(letters)
 
 
-async def get_teachers_by_letter(letter: str, limit: int = 30) -> List[Dict[str, Any]]:
+async def get_teachers_by_letter(letter: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     """Returns teachers whose surname starts with the given letter."""
     all_staff = await get_staffs()
     if not all_staff:
@@ -561,14 +617,14 @@ async def get_teachers_by_letter(letter: str, limit: int = 30) -> List[Dict[str,
     return results[:limit]
 
 
-async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool = False) -> Dict[str, Any]:
+async def _load_group_schedule(group_id: str, date_str: str) -> Dict[str, Any]:
     """
     Parses schedule for a specific group and date.
     URL: /2020/site/schedule/group/{group_id}/{date_str}
     """
     url = f"{ALMETPT_BASE_URL}/2020/site/schedule/group/{group_id}/{date_str}"
     try:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
                 return {
@@ -579,6 +635,7 @@ async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool =
             html_text = decode_response_text(resp)
             soup = BeautifulSoup(html_text, "html.parser")
     except Exception as e:
+        _FAILED_AT["schedule"] = time.time()
         return {
             "success": False,
             "error": f"Не удалось связаться с сайтом техникума: {e}",
@@ -819,14 +876,14 @@ async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool =
     }
 
 
-async def get_teacher_schedule(staff_id: str, date_str: str, force_refresh: bool = False) -> Dict[str, Any]:
+async def _load_teacher_schedule(staff_id: str, date_str: str) -> Dict[str, Any]:
     """
     Parses schedule for a teacher on date_str.
     URL: /2020/site/schedule/staff/{staff_id}/{date_str}
     """
     url = f"{ALMETPT_BASE_URL}/2020/site/schedule/staff/{staff_id}/{date_str}"
     try:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
                 return {
@@ -837,6 +894,7 @@ async def get_teacher_schedule(staff_id: str, date_str: str, force_refresh: bool
             html_text = decode_response_text(resp)
             soup = BeautifulSoup(html_text, "html.parser")
     except Exception as e:
+        _FAILED_AT["schedule"] = time.time()
         return {
             "success": False,
             "error": f"Ошибка соединения с сайтом: {e}",
@@ -1016,6 +1074,58 @@ async def get_teacher_schedule(staff_id: str, date_str: str, force_refresh: bool
     }
 
 
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_TARGET_ID_RE = re.compile(r"[\w-]+")
+
+
+def _store_schedule(key: Tuple[str, str, str], stored_at: float, result: Dict[str, Any]) -> None:
+    """Кладёт удачный ответ в кэш, не давая ему расти бесконечно."""
+    if len(_SCHEDULE_CACHE) >= SCHEDULE_CACHE_MAX_ENTRIES:
+        expired = [k for k, (ts, _) in _SCHEDULE_CACHE.items() if stored_at - ts >= CACHE_TTL_SCHEDULE]
+        for k in expired:
+            _SCHEDULE_CACHE.pop(k, None)
+        while len(_SCHEDULE_CACHE) >= SCHEDULE_CACHE_MAX_ENTRIES:
+            oldest = min(_SCHEDULE_CACHE, key=lambda k: _SCHEDULE_CACHE[k][0])
+            _SCHEDULE_CACHE.pop(oldest, None)
+    _SCHEDULE_CACHE[key] = (stored_at, result)
+
+
+async def _cached_schedule(kind, target_id, date_str, force_refresh, loader) -> Dict[str, Any]:
+    """Короткий TTL-кэш расписания: сайт техникума не должен получать запрос на каждый клик."""
+    target_id = str(target_id)
+    if not _TARGET_ID_RE.fullmatch(target_id) or not _DATE_RE.fullmatch(date_str or ""):
+        return {"success": False, "error": "Некорректный запрос расписания.", "lessons": []}
+
+    key = (kind, target_id, date_str)
+    now_ts = time.time()
+    if not force_refresh:
+        hit = _SCHEDULE_CACHE.get(key)
+        if hit and now_ts - hit[0] < CACHE_TTL_SCHEDULE:
+            return hit[1]
+        if _in_backoff("schedule", SCHEDULE_FAILURE_BACKOFF_SECONDS):
+            return {
+                "success": False,
+                "error": "Сайт техникума временно недоступен. Попробуй ещё раз через минуту.",
+                "lessons": []
+            }
+
+    result = await loader(target_id, date_str)
+    if result.get("success"):
+        _FAILED_AT.pop("schedule", None)
+        _store_schedule(key, now_ts, result)
+    return result
+
+
+async def get_group_schedule(group_id: str, date_str: str, force_refresh: bool = False) -> Dict[str, Any]:
+    """Расписание группы на дату (с коротким кэшем; force_refresh обходит кэш)."""
+    return await _cached_schedule("group", group_id, date_str, force_refresh, _load_group_schedule)
+
+
+async def get_teacher_schedule(staff_id: str, date_str: str, force_refresh: bool = False) -> Dict[str, Any]:
+    """Расписание преподавателя на дату (с коротким кэшем; force_refresh обходит кэш)."""
+    return await _cached_schedule("teacher", staff_id, date_str, force_refresh, _load_teacher_schedule)
+
+
 ROMAN_MAP = {
     "1": "I", "2": "II", "3": "III", "4": "IV",
     "5": "V", "6": "VI", "7": "VII", "8": "VIII"
@@ -1127,14 +1237,22 @@ def format_minutes_ru(m: int) -> str:
     return f"{m} минут"
 
 
-STANDARD_BREAKS = {
-    1: 10,
-    2: 30,
-    3: 10,
-    4: 10,
-    5: 10,
-    6: 5,
-    7: 5
+# Расписание звонков — единственное место, где оно задано: из него строятся и текст «Звонки»,
+# и длительность перемен в расписании. (номер пары, начало, конец, перемена после пары в минутах)
+CALL_SCHEDULE: List[Tuple[str, str, str, Optional[int]]] = [
+    ("I", "08:00", "09:20", 10),
+    ("II", "09:30", "10:50", 30),
+    ("III", "11:20", "12:40", 10),
+    ("IV", "12:50", "14:10", 10),
+    ("V", "14:20", "15:40", 10),
+    ("VI", "15:50", "17:10", 5),
+    ("VII", "17:15", "18:35", 5),
+    ("VIII", "18:40", "20:00", None),
+]
+BIG_BREAK_MINUTES = 30
+
+STANDARD_BREAKS: Dict[int, int] = {
+    number: brk for number, (_, _, _, brk) in enumerate(CALL_SCHEDULE, start=1) if brk is not None
 }
 
 
@@ -1507,14 +1625,11 @@ def format_teacher_schedule_message(
 
 def get_calls_text() -> str:
     """Returns звонки table styled exclusively with premium emojis."""
-    return (
-        f"{te(PE_BELL)} <b>Расписание звонков ГАПОУ «АПТ»:</b>\n\n"
-        f"{te(PE_CLOCK)} <b>I пара:</b> <code>08:00 – 09:20</code> <i>(перемена 10 мин)</i>\n"
-        f"{te(PE_CLOCK)} <b>II пара:</b> <code>09:30 – 10:50</code> <i>(большая перемена 30 мин)</i>\n"
-        f"{te(PE_CLOCK)} <b>III пара:</b> <code>11:20 – 12:40</code> <i>(перемена 10 мин)</i>\n"
-        f"{te(PE_CLOCK)} <b>IV пара:</b> <code>12:50 – 14:10</code> <i>(перемена 10 мин)</i>\n"
-        f"{te(PE_CLOCK)} <b>V пара:</b> <code>14:20 – 15:40</code> <i>(перемена 10 мин)</i>\n"
-        f"{te(PE_CLOCK)} <b>VI пара:</b> <code>15:50 – 17:10</code> <i>(перемена 5 мин)</i>\n"
-        f"{te(PE_CLOCK)} <b>VII пара:</b> <code>17:15 – 18:35</code> <i>(перемена 5 мин)</i>\n"
-        f"{te(PE_CLOCK)} <b>VIII пара:</b> <code>18:40 – 20:00</code>"
-    )
+    lines = [f"{te(PE_BELL)} <b>Расписание звонков ГАПОУ «АПТ»:</b>\n"]
+    for roman, start, end, brk in CALL_SCHEDULE:
+        line = f"{te(PE_CLOCK)} <b>{roman} пара:</b> <code>{start} – {end}</code>"
+        if brk is not None:
+            label = "большая перемена" if brk >= BIG_BREAK_MINUTES else "перемена"
+            line += f" <i>({label} {brk} мин)</i>"
+        lines.append(line)
+    return "\n".join(lines)

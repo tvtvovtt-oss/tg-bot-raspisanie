@@ -8,6 +8,11 @@ RUN addgroup --system bot && adduser --system --ingroup bot bot
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
+# Часовой пояс техникума. По умолчанию контейнер живёт в UTC, из-за чего рассылки по времени
+# уходили бы со сдвигом. Значение можно переопределить переменной TIMEZONE в .env.
+ENV TZ=Europe/Moscow
+ENV TIMEZONE=Europe/Moscow
+
 # Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

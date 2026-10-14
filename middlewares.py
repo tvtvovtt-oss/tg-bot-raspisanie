@@ -4,7 +4,7 @@ from aiogram.types import TelegramObject, Message, CallbackQuery
 
 import logging
 
-from database import ensure_user, is_maintenance_mode, is_admin, is_stat_admin
+from database import ensure_user, is_maintenance_mode, is_admin, is_stat_admin, is_restore_in_progress
 from premium_emoji import te, PE_SETTINGS
 
 
@@ -21,7 +21,8 @@ class UserActivityMiddleware(BaseMiddleware):
         data: Dict[str, Any]
     ) -> Any:
         user = data.get("event_from_user")
-        if user:
+        # Пока восстанавливается база, в неё ничего не пишем: запись всё равно потерялась бы.
+        if user and not is_restore_in_progress():
             try:
                 await ensure_user(
                     user_id=user.id,
@@ -49,7 +50,8 @@ class MaintenanceMiddleware(BaseMiddleware):
         data: Dict[str, Any]
     ) -> Any:
         # Проверяем, активен ли режим тех. обслуживания
-        maint_active = await is_maintenance_mode()
+        # Во время восстановления базы бот ведёт себя как при техническом перерыве.
+        maint_active = await is_maintenance_mode() or is_restore_in_progress()
         if not maint_active:
             return await handler(event, data)
 
