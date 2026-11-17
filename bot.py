@@ -11,6 +11,7 @@ from config import (
     BOT_TOKEN, ENABLE_NOTIFICATIONS, BACKUP_CHANNEL_ID, DROP_PENDING_UPDATES, TIMEZONE, validate_config
 )
 from handlers import router
+from widget_handlers import widget_router
 from parser import get_groups, get_available_dates
 from notifier import schedule_notification_worker
 from broadcast_service import broadcast_scheduler_worker, cancel_background_tasks
@@ -35,6 +36,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="tomorrow", description="Расписание на завтра"),
         BotCommand(command="dates", description="Выбрать дату"),
         BotCommand(command="mygroup", description="Моя группа"),
+        BotCommand(command="widget", description="Расписание-виджет"),
         BotCommand(command="help", description="Справка и помощь"),
     ]
     await bot.set_my_commands(commands)
@@ -71,6 +73,7 @@ async def main():
     dp.callback_query.outer_middleware(UserActivityMiddleware())
     dp.message.outer_middleware(MaintenanceMiddleware())
     dp.callback_query.outer_middleware(MaintenanceMiddleware())
+    dp.include_router(widget_router)
     dp.include_router(router)
 
     # Set commands menu in Telegram UI
