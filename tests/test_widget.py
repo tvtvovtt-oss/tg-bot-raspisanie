@@ -55,6 +55,28 @@ class WidgetPayloadTests(unittest.TestCase):
         self.assertEqual(json.loads(widget.fit_payload(payload)), payload)
 
 
+class DemoWidgetTests(unittest.IsolatedAsyncioTestCase):
+    def test_demo_payload_is_valid_and_fits(self):
+        for day in ("2026-11-16", "2026-11-17", "2026-11-22"):   # пн, вт, вс
+            payload = widget.build_demo_payload(day)
+            self.assertLessEqual(len(widget.fit_payload(payload).encode("utf-8")), widget.ANSWER_LIMIT_BYTES)
+        self.assertEqual(len(widget.build_demo_payload("2026-11-17")["p"]), 5)
+        self.assertIn("m", widget.build_demo_payload("2026-11-22"))
+
+    def test_demo_html_uses_demo_prefix_and_fits(self):
+        html_text = widget.build_widget_html(widget.build_demo_payload("2026-11-17"), prefix=widget.DEMO_PREFIX)
+        widget.check_widget_size(html_text)
+        self.assertIn("PFX='x:'", html_text)
+
+    async def test_demo_query_needs_no_site_or_user(self):
+        bot = SimpleNamespace(answer_widget_query=AsyncMock())
+        query = SimpleNamespace(id="q", data="x:2026-11-17", from_user=SimpleNamespace(id=1))
+        with patch.object(widget_handlers, "get_user", AsyncMock(side_effect=AssertionError("db used"))),              patch.object(widget_handlers, "get_group_schedule", AsyncMock(side_effect=AssertionError("site used"))):
+            await widget_handlers.on_widget_query(query, bot)
+        answer = json.loads(bot.answer_widget_query.await_args.kwargs["data"])
+        self.assertEqual(answer["g"], "ДЕМО-101")
+
+
 class WidgetHtmlTests(unittest.TestCase):
     def test_html_within_telegram_limits(self):
         payload = widget.build_day_payload(make_sched(6, 2), "АПТ-242", "2026-11-17")

@@ -1,5 +1,6 @@
 """Хендлеры виджета «Расписание»: команда /widget и запросы виджета (widget_query)."""
 import asyncio
+import html
 import logging
 from typing import Optional
 
@@ -18,6 +19,8 @@ from parser import (
 from timeutil import today_local_str
 from widget import (
     build_day_payload,
+    DEMO_PREFIX,
+    build_demo_payload,
     build_widget_html,
     check_widget_size,
     fit_payload,
@@ -67,9 +70,35 @@ async def cmd_widget(message: Message, state: FSMContext, bot: Bot):
         await message.answer("Виджет сейчас недоступен, вот расписание обычным сообщением:\n\n" + text)
 
 
+@widget_router.message(Command("widgettest", "widgetdemo"))
+async def cmd_widget_demo(message: Message, state: FSMContext, bot: Bot):
+    """Демо-виджет с выдуманным расписанием: не ходит на сайт и не требует группы."""
+    await state.clear()
+    if message.chat.type != "private":
+        await message.answer("Виджет работает только в личном чате с ботом.")
+        return
+    try:
+        html_text = build_widget_html(build_demo_payload(today_local_str()), prefix=DEMO_PREFIX)
+        check_widget_size(html_text)
+        await bot.send_widget(
+            chat_id=message.chat.id,
+            html=html_text,
+            allow_queries=True,
+            caption="Демо-виджет: расписание выдуманное, сайт техникума не используется",
+            parse_mode=None,
+        )
+    except (TelegramAPIError, ValueError) as e:
+        logger.warning("Демо-виджет не отправился пользователю %s: %s", message.from_user.id, e)
+        await message.answer(f"Telegram не принял виджет: <code>{html.escape(str(e))}</code>")
+
+
 async def _answer_for_query(query: WidgetQuery) -> str:
     """JSON ответа на запрос виджета 'd:ГГГГ-ММ-ДД'. Любая проблема — {"e": текст}, а не молчание (иначе TIMEOUT)."""
     data = query.data or ""
+    if data.startswith(DEMO_PREFIX):
+        if not is_allowed_date(data[2:]):
+            return '{"e":"Некорректный запрос"}'
+        return fit_payload(build_demo_payload(data[2:]))
     if not data.startswith("d:") or not is_allowed_date(data[2:]):
         return '{"e":"Некорректный запрос"}'
     date_str = data[2:]

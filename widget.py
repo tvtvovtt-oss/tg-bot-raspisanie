@@ -10,7 +10,7 @@ import zlib
 from datetime import datetime
 from typing import Any, Dict, List
 
-from parser import parse_pair_times
+from parser import CALL_SCHEDULE, parse_pair_times
 from timeutil import BOT_TZ, now_local
 
 ANSWER_LIMIT_BYTES = 1024        # лимит answerWidgetQuery
@@ -137,7 +137,7 @@ body{margin:0;padding:10px 12px;font:14px/1.35 system-ui,-apple-system,sans-seri
 <div class="st" id="st"></div>
 <div id="c"></div>
 <script>
-var W=window.TelegramWidget,D=__DATA__,TZ=__TZ__,busy=false;
+var W=window.TelegramWidget,D=__DATA__,TZ=__TZ__,PFX='__PFX__',busy=false;
 var DN=['вс','пн','вт','ср','чт','пт','сб'],MN=['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
 var RM={'1':'I','2':'II','3':'III','4':'IV','5':'V','6':'VI','7':'VII','8':'VIII'};
 function $(i){return document.getElementById(i)}
@@ -176,7 +176,7 @@ function render(){
 }
 function load(ds){
   if(!W||busy)return;busy=true;$('c').className='ld';
-  W.request('d:'+ds).then(function(r){var d=null;try{d=JSON.parse(r.result)}catch(e){}
+  W.request(PFX+ds).then(function(r){var d=null;try{d=JSON.parse(r.result)}catch(e){}
     D=d||{d:ds,g:D.g,e:'Не удалось прочитать ответ'}},
   function(e){D={d:ds,g:D.g,e:e&&e.code==='RATE_LIMITED'?'Слишком часто, подожди пару секунд':e&&e.code==='TIMEOUT'?'Сайт техникума долго отвечает, попробуй ещё раз':'Не удалось загрузить расписание'}})
   .then(function(){busy=false;$('c').className='';render()})
@@ -189,11 +189,54 @@ theme();render();setInterval(status,30000);
 </script>"""
 
 
-def build_widget_html(payload: Dict[str, Any]) -> str:
+REAL_PREFIX = "d:"   # запрос виджета с настоящим расписанием
+DEMO_PREFIX = "x:"   # запрос демо-виджета: данные выдуманные, сайт не нужен
+
+
+def build_widget_html(payload: Dict[str, Any], prefix: str = REAL_PREFIX) -> str:
     """HTML виджета с вшитым первым днём. '<' экранируем, чтобы данные не закрыли <script>."""
     data = _dumps(payload).replace("<", "\\u003c")
-    html_text = WIDGET_TEMPLATE.replace("__DATA__", data).replace("__TZ__", str(tz_offset_minutes()))
-    return html_text
+    return (
+        WIDGET_TEMPLATE
+        .replace("__DATA__", data)
+        .replace("__TZ__", str(tz_offset_minutes()))
+        .replace("__PFX__", prefix)
+    )
+
+
+_DEMO_SUBJECTS = [
+    ("Основы проектирования баз данных", "305", "Иванов И.И."),
+    ("Математические методы", "206", "Петрова А.С."),
+    ("Инженерная графика", "319", "Сидоров П.К."),
+    ("Информационные технологии", "112", "Кузнецова М.Н."),
+    ("Физическая культура", "спортзал", "Фёдоров Д.А."),
+    ("Иностранный язык", "214", "Смирнова О.В."),
+    ("Операционные системы", "301", "Галиев Р.Р."),
+    ("Основы философии", "118", "Назарова Л.Т."),
+]
+
+
+def build_demo_payload(date_str: str) -> Dict[str, Any]:
+    """Выдуманное расписание для проверки виджета без сайта: 5 пар по реальному расписанию звонков."""
+    payload: Dict[str, Any] = {"d": date_str, "g": "ДЕМО-101"}
+    try:
+        weekday = datetime.strptime(date_str, "%Y-%m-%d").weekday()
+    except ValueError:
+        weekday = 0
+    if weekday == 6:
+        payload["p"] = []
+        payload["m"] = "Пар нет! Воскресенье."
+        return payload
+    pairs = []
+    for index, (number, start, end, _) in enumerate(CALL_SCHEDULE[:5]):
+        subject, room, teacher = _DEMO_SUBJECTS[(index + weekday) % len(_DEMO_SUBJECTS)]
+        items = [[subject, room, teacher, ""]]
+        if index == 1:   # одна пара с подгруппами — чтобы видеть, как они выглядят
+            other = _DEMO_SUBJECTS[(index + weekday + 3) % len(_DEMO_SUBJECTS)]
+            items = [[subject, room, teacher, "1п/гр."], [other[0], other[1], other[2], "2п/гр."]]
+        pairs.append([number, start, end, items])
+    payload["p"] = pairs
+    return payload
 
 
 def check_widget_size(html_text: str) -> None:
