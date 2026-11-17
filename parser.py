@@ -1,3 +1,4 @@
+import asyncio
 import time
 import re
 import html
@@ -38,7 +39,12 @@ FAILURE_BACKOFF_SECONDS = 30
 SCHEDULE_FAILURE_BACKOFF_SECONDS = 15
 _FAILED_AT: Dict[str, float] = {}
 
-HTTP_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+# Сайт техникума бывает медленным: одно только TLS-рукопожатие порой занимает 2–5 секунд,
+# а httpx считает его частью connect. Слишком жёсткий connect давал «Не удалось связаться с сайтом».
+HTTP_TIMEOUT = httpx.Timeout(20.0, connect=12.0)
+HTTP_RETRIES = 2                 # дополнительные попытки после первой
+HTTP_RETRY_DELAY = 1.0           # пауза перед повтором растёт: 1с, 2с
+RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -104,6 +110,34 @@ def decode_response_json(resp: httpx.Response) -> Any:
     return json.loads(text)
 
 
+def describe_error(exc: BaseException) -> str:
+    """Текст ошибки для пользователя: у таймаутов httpx str(e) пустой, поэтому добавляем тип."""
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+class RetryingClient(httpx.AsyncClient):
+    """AsyncClient, который повторяет GET при сетевых сбоях и временных ответах сайта (502/503/...)."""
+
+    async def get(self, *args, **kwargs):  # type: ignore[override]
+        last_exc: Optional[BaseException] = None
+        for attempt in range(HTTP_RETRIES + 1):
+            if attempt:
+                await asyncio.sleep(HTTP_RETRY_DELAY * attempt)
+            try:
+                resp = await super().get(*args, **kwargs)
+            except httpx.TransportError as e:
+                last_exc = e
+                logger.warning("Запрос к сайту не удался (попытка %d): %s", attempt + 1, describe_error(e))
+                continue
+            if resp.status_code in RETRY_STATUS_CODES and attempt < HTTP_RETRIES:
+                logger.warning("Сайт вернул код %s (попытка %d), повторяю", resp.status_code, attempt + 1)
+                continue
+            return resp
+        assert last_exc is not None
+        raise last_exc
+
+
 def _in_backoff(key: str, seconds: float = FAILURE_BACKOFF_SECONDS) -> bool:
     """True, если недавно (в пределах seconds) запрос по ключу завершился сбоем."""
     failed_at = _FAILED_AT.get(key)
@@ -151,7 +185,7 @@ def _build_fallback_dates() -> Dict[str, Any]:
 async def _fetch_dates() -> Optional[Dict[str, Any]]:
     """Один запрос списка дат. None — сайт ответил не так, как ожидалось."""
     url = f"{ALMETPT_BASE_URL}/2020/schedule/dates"
-    async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
+    async with RetryingClient(headers=XHR_HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
         resp = await client.get(url)
     if resp.status_code != 200:
         logger.warning("Список дат: сайт вернул код %s", resp.status_code)
@@ -340,7 +374,7 @@ async def get_groups(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
 
     url = f"{ALMETPT_BASE_URL}/2020/json/groups"
     try:
-        async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
+        async with RetryingClient(headers=XHR_HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
                 data = decode_response_json(resp)
@@ -525,7 +559,7 @@ async def get_staffs(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
 
     url = f"{ALMETPT_BASE_URL}/2020/json/staffs"
     try:
-        async with httpx.AsyncClient(headers=XHR_HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
+        async with RetryingClient(headers=XHR_HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
                 data = decode_response_json(resp)
@@ -624,7 +658,7 @@ async def _load_group_schedule(group_id: str, date_str: str) -> Dict[str, Any]:
     """
     url = f"{ALMETPT_BASE_URL}/2020/site/schedule/group/{group_id}/{date_str}"
     try:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
+        async with RetryingClient(headers=HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
                 return {
@@ -638,7 +672,7 @@ async def _load_group_schedule(group_id: str, date_str: str) -> Dict[str, Any]:
         _FAILED_AT["schedule"] = time.time()
         return {
             "success": False,
-            "error": f"Не удалось связаться с сайтом техникума: {e}",
+            "error": f"Не удалось связаться с сайтом техникума ({describe_error(e)}). Попробуй ещё раз через минуту.",
             "lessons": []
         }
 
@@ -883,7 +917,7 @@ async def _load_teacher_schedule(staff_id: str, date_str: str) -> Dict[str, Any]
     """
     url = f"{ALMETPT_BASE_URL}/2020/site/schedule/staff/{staff_id}/{date_str}"
     try:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
+        async with RetryingClient(headers=HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
                 return {
@@ -897,7 +931,7 @@ async def _load_teacher_schedule(staff_id: str, date_str: str) -> Dict[str, Any]
         _FAILED_AT["schedule"] = time.time()
         return {
             "success": False,
-            "error": f"Ошибка соединения с сайтом: {e}",
+            "error": f"Не удалось связаться с сайтом техникума ({describe_error(e)}). Попробуй ещё раз через минуту.",
             "lessons": []
         }
 
